@@ -37,11 +37,25 @@ local function chomp(s)
   local trimmed = (s or ''):gsub('%s+$', '')
   return trimmed
 end
+local function trim(s)
+  return (s or ''):match('^%s*(.-)%s*$')
+end
 -- split on NUL, returning every field including trailing empties dropped
 local function nul_split(s)
   local t = {}
   for field in (s or ''):gmatch('([^%z]*)%z') do t[#t + 1] = field end
   return t
+end
+
+local function remote_names()
+  local res = git({ 'remote' }, { allow_fail = true })
+  local names = {}
+  if res.code == 0 then
+    for name in (res.stdout or ''):gmatch('[^\r\n]+') do
+      names[#names + 1] = name
+    end
+  end
+  return names
 end
 
 -- In-progress sequencer operation, if any. Merge/cherry-pick/revert leave a
@@ -75,7 +89,10 @@ end
 local function gather()
   local m = { branches = {}, worktrees = {}, staged = {}, unstaged = {},
               untracked = {}, conflicts = {}, commits = {}, unpushed = {},
-              pushes = {}, head = {} }
+              pushes = {}, remotes = {}, head = {} }
+
+  m.remotes = remote_names()
+  m.has_remotes = #m.remotes > 0
 
   -- HEAD classification (branch / detached / unborn)
   local sym = git({ 'symbolic-ref', '--quiet', '--short', 'HEAD' }, { allow_fail = true })
@@ -233,12 +250,12 @@ local function gather()
   -- committed-but-not-pushed: reachable from HEAD, not from ANY remote ref.
   -- Correct without an upstream (still catches local-only commits) and when
   -- the branch was pushed to a different remote. Gated on there being at
-  -- least one remote-tracking ref, because with none "--not --remotes"
-  -- subtracts nothing and would list the entire history as "unpushed".
+  -- least one configured remote. When a remote has no tracking refs yet,
+  -- "--not --remotes" intentionally lists the whole local history: none of it
+  -- has been observed on a remote, which is the useful result after attaching
+  -- a new/empty remote or after an initial push fails.
   -- Fetches 51 to detect (and flag) the >50 overflow case.
   if not m.head.unborn then
-    local rem = git({ 'for-each-ref', '--count=1', 'refs/remotes' }, { allow_fail = true })
-    m.has_remotes = (rem.code == 0 and chomp(rem.stdout) ~= '')
     if m.has_remotes then
       local un = git({ 'log', 'HEAD', '--not', '--remotes', '-z',
         '--format=%h%x00%s%x00%D', '-n', '51' }, { allow_fail = true })
@@ -483,7 +500,8 @@ local function render(m)
     local ucount = (#m.unpushed > 50) and '50+' or #m.unpushed
     section('unpushed', 'Committed (not pushed)', ucount, function()
       if #m.unpushed == 0 then
-        return empty_row(m.has_remotes and '(nothing to push)' or '(no remote configured)')
+        return empty_row(m.has_remotes and '(nothing to push)' or
+          '(no remote configured — P to publish)')
       end
       local shown = math.min(#m.unpushed, 50)
       for i = 1, shown do commit_row(m.unpushed[i], 'unpushed') end
@@ -1263,15 +1281,177 @@ function M.remove_worktree()
   M.refresh()
 end
 
-function M.push()
-  local ok, res = run({ 'push' }, { quiet = true })
-  if not ok and (res.stderr or ''):match('has no upstream branch') then
-    local br = git({ 'symbolic-ref', '--quiet', '--short', 'HEAD' }, { allow_fail = true })
-    if br.code == 0 then run({ 'push', '-u', 'origin', chomp(br.stdout) }) end
-  elseif not ok then
-    vim.notify('git push:\n' .. chomp(res.stderr), vim.log.levels.WARN)
+local function current_branch()
+  local res = git({ 'symbolic-ref', '--quiet', '--short', 'HEAD' }, { allow_fail = true })
+  if res.code ~= 0 then return nil end
+  local branch = chomp(res.stdout)
+  return branch ~= '' and branch or nil
+end
+
+local function push_branch(remote, branch, remote_was_added)
+  local ok, res = run({ 'push', '-u', remote, branch }, { quiet = true })
+  if not ok then
+    local retained = remote_was_added and
+      ('\nRemote "' .. remote .. '" remains configured; fix the error and press P to retry.') or ''
+    vim.notify('git push -u ' .. remote .. ' ' .. branch .. ':\n' ..
+      chomp(res.stderr) .. retained, vim.log.levels.WARN)
+  else
+    vim.notify('GitPanel: pushed ' .. branch .. ' to ' .. remote ..
+      ' and set its upstream', vim.log.levels.INFO)
   end
   M.refresh()
+  return ok
+end
+
+-- Git itself can attach and push to a URL, but creating a hosted repository is
+-- provider-specific. GitHub's optional `gh` CLI provides that missing API; the
+-- URL path remains available for GitLab, Bitbucket, self-hosted Git, and bare
+-- repositories created outside the panel.
+local function publish_github(branch)
+  if fn.executable('gh') ~= 1 then
+    return vim.notify('GitPanel: GitHub CLI (gh) is not installed. Install it and run ' ..
+      '`gh auth login`, or choose "Attach an existing remote URL".', vim.log.levels.WARN)
+  end
+
+  local default_name = fn.fnamemodify(M.root or '', ':t')
+  vim.ui.input({
+    prompt = 'GitHub repository name (REPO or OWNER/REPO): ',
+    default = default_name,
+  }, function(repo)
+    repo = trim(repo)
+    if repo == '' then return end
+
+    local visibilities = {
+      { label = 'Private', flag = '--private' },
+      { label = 'Public', flag = '--public' },
+      { label = 'Internal (GitHub Enterprise)', flag = '--internal' },
+    }
+    vim.ui.select(visibilities, {
+      prompt = 'Repository visibility:',
+      format_item = function(item) return item.label end,
+    }, function(visibility)
+      if not visibility then return end
+      local pick = fn.confirm(
+        'Create GitHub repository "' .. repo .. '" as ' .. visibility.label:lower() ..
+        '?\n\nThis adds remote "origin" and pushes branch "' .. branch .. '".',
+        '&Create and push\n&Cancel', 2)
+      if pick ~= 1 then return end
+
+      local cmd = {
+        'gh', 'repo', 'create', repo, visibility.flag,
+        '--source', M.root, '--remote', 'origin', '--push',
+      }
+      vim.notify('GitPanel: creating ' .. repo .. ' and pushing ' .. branch .. '…',
+        vim.log.levels.INFO)
+      local res = vim.system(cmd, {
+        text = true,
+        cwd = M.root,
+        env = { LC_ALL = 'C', GH_PROMPT_DISABLED = '1' },
+      }):wait()
+
+      if res.code ~= 0 then
+        local detail = chomp((res.stderr or '') .. (res.stdout or ''))
+        local origin = git({ 'remote', 'get-url', 'origin' }, { allow_fail = true })
+        local partial = ''
+        if origin.code == 0 then
+          partial = '\n\norigin is now ' .. chomp(origin.stdout) ..
+            '. The repository may already exist; fix the error and press P to retry the push.'
+        end
+        vim.notify('gh repo create failed:\n' .. detail .. partial, vim.log.levels.ERROR)
+        M.refresh()
+        return
+      end
+
+      -- gh normally establishes tracking with --push. Keep that invariant
+      -- explicit in case a CLI/version leaves only the remote ref behind.
+      local upstream = git({ 'rev-parse', '--verify', '--quiet', '@{upstream}' },
+        { allow_fail = true })
+      if upstream.code ~= 0 then
+        local tracked = git({ 'branch', '--set-upstream-to=origin/' .. branch,
+          '--', branch }, { allow_fail = true })
+        if tracked.code ~= 0 then
+          vim.notify('GitPanel: repository was created and pushed, but upstream tracking ' ..
+            'could not be set:\n' .. chomp(tracked.stderr), vim.log.levels.WARN)
+          M.refresh()
+          return
+        end
+      end
+
+      local url = chomp(res.stdout)
+      vim.notify('GitPanel: created ' .. repo .. ' and pushed ' .. branch ..
+        (url ~= '' and ('\n' .. url) or ''), vim.log.levels.INFO)
+      M.refresh()
+    end)
+  end)
+end
+
+local function attach_remote_url(branch)
+  vim.ui.input({ prompt = 'Remote URL to add as origin: ' }, function(url)
+    url = trim(url)
+    if url == '' then return end
+    local ok, res = run({ 'remote', 'add', 'origin', url }, { quiet = true })
+    if not ok then
+      vim.notify('git remote add origin:\n' .. chomp(res.stderr), vim.log.levels.ERROR)
+      M.refresh()
+      return
+    end
+    push_branch('origin', branch, true)
+  end)
+end
+
+function M.publish()
+  if #remote_names() > 0 then return M.push() end
+
+  local branch = current_branch()
+  if not branch then
+    return vim.notify('GitPanel: cannot publish a detached HEAD; switch to a branch first',
+      vim.log.levels.WARN)
+  end
+  local head = git({ 'rev-parse', '--verify', '--quiet', 'HEAD' }, { allow_fail = true })
+  if head.code ~= 0 then
+    return vim.notify('GitPanel: create at least one commit before publishing this repository',
+      vim.log.levels.INFO)
+  end
+
+  local gh_available = fn.executable('gh') == 1
+  local choices = {
+    { id = 'github', label = 'Create a new GitHub repository' ..
+      (gh_available and '' or ' (gh not installed)') },
+    { id = 'url', label = 'Attach an existing remote URL' },
+  }
+  vim.ui.select(choices, {
+    prompt = 'No Git remote is configured. Publish how?',
+    format_item = function(item) return item.label end,
+  }, function(choice)
+    if not choice then return end
+    if choice.id == 'github' then publish_github(branch)
+    else attach_remote_url(branch) end
+  end)
+end
+
+function M.push()
+  local remotes = remote_names()
+  if #remotes == 0 then return M.publish() end
+
+  local branch = current_branch()
+  if not branch then
+    return vim.notify('GitPanel: cannot push a detached HEAD; switch to a branch first',
+      vim.log.levels.WARN)
+  end
+
+  local upstream = git({ 'rev-parse', '--verify', '--quiet', '@{upstream}' },
+    { allow_fail = true })
+  if upstream.code == 0 then
+    local ok, res = run({ 'push' }, { quiet = true })
+    if not ok then vim.notify('git push:\n' .. chomp(res.stderr), vim.log.levels.WARN) end
+    M.refresh()
+    return
+  end
+
+  if #remotes == 1 then return push_branch(remotes[1], branch) end
+  vim.ui.select(remotes, { prompt = 'Push "' .. branch .. '" to remote:' }, function(remote)
+    if remote then push_branch(remote, branch) end
+  end)
 end
 function M.pull() run({ 'pull', '--ff-only' }); M.refresh() end
 function M.fetch() run({ 'fetch', '--all', '--prune' }); M.refresh() end
@@ -1306,7 +1486,8 @@ local HELP = {
   '  d       delete branch / remove worktree (context-sensitive)',
   '  W       new worktree',
   '',
-  '  F / P   pull (--ff-only) / push     f   fetch --all --prune',
+  '  F / P   pull (--ff-only) / push (publish if no remote)',
+  '  f       fetch --all --prune',
   '  L       toggle layout (full tab <-> left split)',
   '  r       refresh    g? / ?  this help    q   close',
 }
@@ -1331,7 +1512,12 @@ function M.attach_keys()
   local function k(lhs, fnc, desc)
     vim.keymap.set('n', lhs, fnc, { buffer = buf, nowait = true, silent = true, desc = 'GitPanel: ' .. desc })
   end
-  k('<CR>', M.primary, 'primary action')
+  -- Some terminals/SSH paths encode the Enter key as LF or keypad Enter.
+  -- Keep these mappings buffer-local: ordinary editing buffers retain their
+  -- normal Enter motions, while every terminal representation works here.
+  for _, lhs in ipairs({ '<CR>', '<NL>', '<kEnter>' }) do
+    k(lhs, M.primary, 'primary action')
+  end
   k('<Tab>', M.toggle_view, 'switch Changes view')
   k('za', M.toggle_fold, 'fold/unfold section')
   k('s', M.stage, 'stage file')
@@ -1354,7 +1540,7 @@ function M.attach_keys()
     if it and it.kind == 'worktree' then M.remove_worktree() else M.delete_branch() end
   end, 'delete branch / remove worktree')
   k('W', M.new_worktree, 'new worktree')
-  k('P', M.push, 'push')
+  k('P', M.push, 'push / publish repository')
   k('F', M.pull, 'pull (--ff-only)')
   k('f', M.fetch, 'fetch')
   k('L', M.toggle_layout, 'toggle tab/split')

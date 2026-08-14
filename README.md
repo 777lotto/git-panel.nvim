@@ -13,7 +13,9 @@ Lua module or command files.
 - Neovim 0.10 or newer
 - Git available on `PATH`
 
-No Lua plugin dependencies are required.
+No Lua plugin dependencies are required. The GitHub CLI (`gh`) is optional: it
+enables creating a GitHub repository directly from the panel. Without it, the
+panel can still attach and push to an existing Git remote URL.
 
 ## Installation
 
@@ -47,14 +49,14 @@ point is `require("git_panel").open("tab")` or `.open("split")`.
 | Key | Action |
 | --- | --- |
 | `<Tab>` | Toggle work and history views |
-| `<CR>` | Act on the item under the cursor |
+| `<CR>` | Act on the item under the cursor (LF/keypad Enter also work) |
 | `s` / `u` | Stage / unstage the selected file |
 | `S` / `U` | Stage / unstage all |
 | `c` / `C` | Commit staged / stage all and commit |
 | `a` | Amend the last commit |
 | `b` / `R` / `d` | Create / rename / delete a branch |
 | `W` | Create a worktree |
-| `F` / `P` / `f` | Pull / push / fetch |
+| `F` / `P` / `f` | Pull / push-or-publish / fetch |
 | `L` | Toggle tab and split layouts |
 | `r` | Refresh |
 | `?` | Show the complete in-panel help |
@@ -62,6 +64,19 @@ point is `require("git_panel").open("tab")` or `.open("split")`.
 
 Conflict workflows expose take-ours/take-theirs, continue, and abort actions;
 remote branch renames use leases and avoid overwriting an unrelated ref.
+
+When `P` is pressed in a repository with no configured remote, GitPanel offers
+two paths:
+
+- create a private, public, or internal GitHub repository with `gh repo create`,
+  add it as `origin`, and push the current branch;
+- attach an already-created URL as `origin` and push the current branch, which
+  works with GitLab, Bitbucket, self-hosted Git, or a bare repository.
+
+The GitHub path requires `gh` to be installed and authenticated with
+`gh auth login`. Publishing requires at least one local commit. If a remote
+already exists but the branch has no upstream, `P` selects the remote when
+needed and pushes with upstream tracking.
 
 ## Project layout
 

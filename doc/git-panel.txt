@@ -12,7 +12,8 @@ CONTENTS                                                   *git-panel-contents*
 1. REQUIREMENTS                                           *git-panel-requirements*
 
 Neovim 0.10 or newer and the Git executable on $PATH. The plugin has no Lua
-dependencies.
+dependencies. GitHub CLI (gh) is optional; when installed and authenticated it
+can create a GitHub repository during the first push.
 
 ==============================================================================
 2. COMMANDS                                                     *git-panel-commands*
@@ -27,6 +28,7 @@ The following mappings are local to the panel buffer:
 
 <Tab>       Toggle Staged/Unstaged and Committed/Uncommitted views.
 <CR>        Act on the current section, branch, worktree, file, commit, or push.
+<NL>/<kEnter>  The LF and keypad forms of Enter perform the same action.
 za          Fold or unfold the current section.
 s / u       Stage or unstage the current file.
 S / U       Stage all or unstage all.
@@ -38,7 +40,9 @@ a           Amend the last commit.
 b / R / d   Create, rename, or delete a branch.
 m           Merge the branch under the cursor into the current branch.
 W           Create a worktree.
-F / P / f   Pull with --ff-only, push, or fetch all remotes and prune.
+F / P / f   Pull with --ff-only, push/publish, or fetch all remotes and prune.
+            With no remote, P can create a GitHub repo using gh or attach an
+            existing remote URL as origin, then push with upstream tracking.
 L           Toggle full-tab and left-split layouts.
 r           Refresh.
 ? / g?      Open the in-panel help window.
