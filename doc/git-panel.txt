@@ -1,0 +1,58 @@
+*git-panel.txt* *git-panel.nvim*      Dependency-free Git dashboard for Neovim
+
+==============================================================================
+CONTENTS                                                   *git-panel-contents*
+
+1. Requirements ....................................... |git-panel-requirements|
+2. Commands ............................................... |git-panel-commands|
+3. Keys ....................................................... |git-panel-keys|
+4. Lua API ..................................................... |git-panel-api|
+
+==============================================================================
+1. REQUIREMENTS                                           *git-panel-requirements*
+
+Neovim 0.10 or newer and the Git executable on $PATH. The plugin has no Lua
+dependencies.
+
+==============================================================================
+2. COMMANDS                                                     *git-panel-commands*
+
+:GitPanel             Open the dashboard in a tab page.
+:GitPanelSplit        Open the dashboard as a left split.
+
+==============================================================================
+3. KEYS                                                             *git-panel-keys*
+
+The following mappings are local to the panel buffer:
+
+<Tab>       Toggle Staged/Unstaged and Committed/Uncommitted views.
+<CR>        Act on the current section, branch, worktree, file, commit, or push.
+za          Fold or unfold the current section.
+s / u       Stage or unstage the current file.
+S / U       Stage all or unstage all.
+x           Discard the current file's changes after confirmation.
+o / t       Resolve a conflict by taking ours or theirs, then stage it.
+> / A       Continue or abort an in-progress Git operation.
+c / C       Commit staged changes or stage everything and commit.
+a           Amend the last commit.
+b / R / d   Create, rename, or delete a branch.
+m           Merge the branch under the cursor into the current branch.
+W           Create a worktree.
+F / P / f   Pull with --ff-only, push, or fetch all remotes and prune.
+L           Toggle full-tab and left-split layouts.
+r           Refresh.
+? / g?      Open the in-panel help window.
+q           Close the panel.
+
+==============================================================================
+4. LUA API                                                           *git-panel-api*
+
+The module is returned by: >lua
+
+    local git_panel = require("git_panel")
+    git_panel.open("tab")    -- or "split"
+    git_panel.refresh()
+    git_panel.close()
+<
+
+vim:tw=78:ts=8:noet:ft=help:norl:
