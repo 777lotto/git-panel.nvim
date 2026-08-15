@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a reproducible GitPanel problem
+title: "[Bug]: "
+labels:
+  - "type:bug"
+  - "status:needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for providing a focused reproduction. Report security issues privately through the Security tab.
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - Windows (untested)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: nvim-version
+    attributes:
+      label: Neovim version
+      description: Paste the first line of `nvim --version`.
+      placeholder: NVIM v0.12.4
+    validations:
+      required: true
+  - type: input
+    id: git-version
+    attributes:
+      label: Git version
+      description: Paste `git --version`.
+    validations:
+      required: true
+  - type: input
+    id: revision
+    attributes:
+      label: GitPanel revision
+      description: Commit SHA or release tag.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Include the repository state and smallest reliable command/key sequence.
+      placeholder: |
+        1. Create or clone ...
+        2. Open `:GitPanel`
+        3. Press ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Include relevant `:messages` output after removing credentials and private paths.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I reproduced this on the current `bet` or `bluff` branch.
+          required: true
+        - label: I checked existing issues for the same problem.
+          required: true
+        - label: I removed credentials, remote URLs containing tokens, and private repository details.
+          required: true

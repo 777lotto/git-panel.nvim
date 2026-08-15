@@ -1,6 +1,8 @@
 git-panel-api	git-panel.txt	/*git-panel-api*
 git-panel-commands	git-panel.txt	/*git-panel-commands*
 git-panel-contents	git-panel.txt	/*git-panel-contents*
+git-panel-development	git-panel.txt	/*git-panel-development*
+git-panel-installation	git-panel.txt	/*git-panel-installation*
 git-panel-keys	git-panel.txt	/*git-panel-keys*
 git-panel-requirements	git-panel.txt	/*git-panel-requirements*
 git-panel.nvim	git-panel.txt	/*git-panel.nvim*

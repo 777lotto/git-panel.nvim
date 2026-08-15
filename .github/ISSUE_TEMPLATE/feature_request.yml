@@ -1,0 +1,58 @@
+name: Feature request
+description: Propose a focused GitPanel improvement
+title: "[Feature]: "
+labels:
+  - "type:feature"
+  - "status:needs-triage"
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Dashboard rendering
+        - Staging and commits
+        - Branches and merging
+        - Worktrees
+        - Remotes and publishing
+        - Conflict resolution
+        - Documentation
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform scope
+      options:
+        - Portable / all platforms
+        - Linux
+        - macOS
+        - Windows (untested)
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Explain the Git workflow gap before proposing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I checked existing issues for similar work.
+          required: true
+        - label: The proposal keeps shell execution and remote handling explicit and safe.
+          required: true
