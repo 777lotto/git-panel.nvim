@@ -237,12 +237,15 @@ local function gather()
 
   -- recent commits (skip when unborn — git log would fail)
   if not m.head.unborn then
-    local lg = git({ 'log', '-n', '30', '--format=%h%x00%s%x00%D', '-z',
+    -- %G? = signature status per commit (G/U good, N none, E can't check, …).
+    -- Costs one gpg verification per *signed* commit; unsigned rows are free.
+    local lg = git({ 'log', '-n', '30', '--format=%h%x00%G?%x00%s%x00%D', '-z',
       '--decorate=short', 'HEAD' }, { allow_fail = true })
     if lg.code == 0 then
       local toks = nul_split(lg.stdout)
-      for j = 1, #toks - 2, 3 do
-        m.commits[#m.commits + 1] = { sha = toks[j], subject = toks[j + 1], refs = toks[j + 2] }
+      for j = 1, #toks - 3, 4 do
+        m.commits[#m.commits + 1] = { sha = toks[j], sig = toks[j + 1],
+          subject = toks[j + 2], refs = toks[j + 3] }
       end
     end
   end
@@ -258,11 +261,12 @@ local function gather()
   if not m.head.unborn then
     if m.has_remotes then
       local un = git({ 'log', 'HEAD', '--not', '--remotes', '-z',
-        '--format=%h%x00%s%x00%D', '-n', '51' }, { allow_fail = true })
+        '--format=%h%x00%G?%x00%s%x00%D', '-n', '51' }, { allow_fail = true })
       if un.code == 0 then
         local toks = nul_split(un.stdout)
-        for j = 1, #toks - 2, 3 do
-          m.unpushed[#m.unpushed + 1] = { sha = toks[j], subject = toks[j + 1], refs = toks[j + 2] }
+        for j = 1, #toks - 3, 4 do
+          m.unpushed[#m.unpushed + 1] = { sha = toks[j], sig = toks[j + 1],
+            subject = toks[j + 2], refs = toks[j + 3] }
         end
       end
     end
@@ -408,14 +412,32 @@ local function render(m)
     span(lnum, 5, 5 + #xy, 'GitPanelConflict')            -- the XY code
     span(lnum, #prefix + #rec.path, -1, 'GitPanelHint')   -- the "(label)"
   end
-  -- a commit row: <sha>  <subject>  (refs)
+  -- a commit row: <sha> <sig> <subject>  (refs)
+  -- sig glyph from git's %G?: ✓ good signature (G, or U = good/unknown trust),
+  -- ✗ unsigned (N), ? signed but unverifiable here (E = key missing),
+  -- ! bad/expired/revoked (B/X/Y/R). Absent sig field (push rows reuse
+  -- commit_row callers that predate the field) renders no glyph.
+  local sig_glyphs = {
+    G = { '✓', 'GitPanelSigOk' },   U = { '✓', 'GitPanelSigOk' },
+    N = { '✗', 'GitPanelSigNone' }, E = { '?', 'GitPanelSigUnknown' },
+    B = { '!', 'GitPanelSigBad' },  X = { '!', 'GitPanelSigBad' },
+    Y = { '!', 'GitPanelSigBad' },  R = { '!', 'GitPanelSigBad' },
+  }
   local function commit_row(c, section_id)
     local refs = (c.refs and c.refs ~= '') and ('  (' .. c.refs .. ')') or ''
     local prefix = '     '
-    local lnum = emit(prefix .. c.sha .. '  ' .. c.subject .. refs,
+    local glyph, glyph_hl = '', nil
+    local g = c.sig and sig_glyphs[c.sig]
+    if g then glyph, glyph_hl = g[1] .. ' ', g[2] end
+    local lnum = emit(prefix .. c.sha .. '  ' .. glyph .. c.subject .. refs,
       { kind = 'commit', value = c.sha, section = section_id })
     span(lnum, #prefix, #prefix + #c.sha, 'GitPanelHash')
-    if refs ~= '' then span(lnum, #prefix + #c.sha + 2 + #c.subject, -1, 'GitPanelRef') end
+    if glyph_hl then
+      span(lnum, #prefix + #c.sha + 2, #prefix + #c.sha + 2 + #glyph, glyph_hl)
+    end
+    if refs ~= '' then
+      span(lnum, #prefix + #c.sha + 2 + #glyph + #c.subject, -1, 'GitPanelRef')
+    end
   end
   -- a push row: <sha>  <date>  <reflog subject>. <CR> shows old..new commits.
   local function push_row(e)
@@ -547,6 +569,10 @@ local function define_hl()
   link('GitPanelOp', 'WarningMsg')
   link('GitPanelHash', 'Constant')
   link('GitPanelRef', 'Special')
+  link('GitPanelSigOk', 'DiagnosticOk')
+  link('GitPanelSigNone', 'DiagnosticWarn')
+  link('GitPanelSigUnknown', 'DiagnosticHint')
+  link('GitPanelSigBad', 'DiagnosticError')
 end
 
 -- ---------------------------------------------------------------------------
@@ -915,13 +941,35 @@ function M.op_abort()
   M.refresh()
 end
 
+-- Signing failed (card absent, PIN cancelled, gpg broken)? Offer ONE explicit
+-- fallback to an unsigned commit. Never silent: cancelling pinentry must not
+-- quietly produce an unsigned commit, so the default answer is No. The panel's
+-- ✓/✗ column shows what actually happened either way.
+local function sign_failed(stderr)
+  return stderr:find('gpg failed to sign', 1, true)
+      or stderr:find('signing failed', 1, true)
+end
+local function run_commit(args)
+  local ok, res = run(args, { quiet = true })
+  if not ok and sign_failed(res.stderr) then
+    local pick = fn.confirm('GPG signing failed (card absent / PIN cancelled?).\n' ..
+      'Commit UNSIGNED instead?', '&Yes\n&No', 2)
+    if pick == 1 then
+      local retry = vim.deepcopy(args)
+      table.insert(retry, 2, '--no-gpg-sign')
+      ok, res = run(retry, { quiet = true })
+      if ok then vim.notify('GitPanel: committed UNSIGNED', vim.log.levels.WARN) end
+    end
+  end
+  if not ok then vim.notify('git commit:\n' .. chomp(res.stderr), vim.log.levels.ERROR) end
+  return ok
+end
 local function do_commit(extra_args)
   vim.ui.input({ prompt = 'Commit message: ' }, function(msg)
     if not msg or msg == '' then return vim.notify('GitPanel: commit cancelled', vim.log.levels.INFO) end
     local args = { 'commit', '-m', msg }
     for _, a in ipairs(extra_args or {}) do args[#args + 1] = a end
-    local ok, res = run(args, { quiet = true })
-    if not ok then vim.notify('git commit:\n' .. chomp(res.stderr), vim.log.levels.ERROR) end
+    run_commit(args)
     M.refresh()
   end)
 end
@@ -944,8 +992,7 @@ function M.amend()
   vim.ui.input({ prompt = 'Amend message (empty = keep existing): ' }, function(msg)
     local args = (msg and msg ~= '') and { 'commit', '--amend', '-m', msg }
       or { 'commit', '--amend', '--no-edit' }
-    local ok, res = run(args, { quiet = true })
-    if not ok then vim.notify('git commit --amend:\n' .. chomp(res.stderr), vim.log.levels.ERROR) end
+    run_commit(args)
     M.refresh()
   end)
 end
