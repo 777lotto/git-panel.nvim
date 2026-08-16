@@ -61,7 +61,9 @@ local SECTIONS = {
       { keys = { '<CR>' }, description = 'Open an in-editor summary for a workflow run, issue, or pull request' },
       { keys = { 'gx' }, description = 'Open the selected item on GitHub' },
       { keys = { 'r' }, description = 'Synchronize the active GitHub view now' },
-      { note = 'GitHub data is read-only and refreshes asynchronously; local Git views never require network access.' },
+      { keys = { 'go', 'gd' }, description = 'Check out / diff the selected pull request against its base' },
+      { keys = { 'gc', 'gm' }, description = 'Comment on / merge the selected pull request (merge deletes its branch, after a confirm)' },
+      { note = 'Issue and workflow data stay read-only; pull-request writes always confirm first. Local Git views never require network access.' },
     },
   },
   {

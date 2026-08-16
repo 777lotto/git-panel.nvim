@@ -459,8 +459,8 @@ local function render(m)
     local text, tabs = '  ', {}
     for index = first, last do
       local view = VIEWS[index]
-      local label = '[' .. (view.id == M.view and '*' or ' ') .. ' ' .. index .. ' ' .. view.label .. ']'
-      if index > first then text = text .. '  ' end
+      local label = (view.id == M.view and '▸ ' or '  ') .. index .. ' ' .. view.label
+      if index > first then text = text .. '   ' end
       local start_col = #text
       text = text .. label
       tabs[#tabs + 1] = { view = view, start_col = start_col, end_col = #text }
@@ -504,8 +504,12 @@ local function render(m)
   -- ---- a foldable section with header + body rows ------------------------
   local function section(id, title, count, render_body)
     local head_item = { kind = 'section', section = id }
+    -- an empty section is one dimmed line: present for orientation, quiet
+    -- enough that populated sections carry the eye
+    local empty = count == 0 or count == '0'
     local h = emit(' ' .. chevron(id) .. ' ' .. title ..
-      (count ~= nil and ('  (' .. count .. ')') or ''), head_item, 'GitPanelSection')
+      (count ~= nil and ('  (' .. count .. ')') or ''), head_item,
+      empty and 'GitPanelHint' or 'GitPanelSection')
     span(h, 1, 4, 'GitPanelHint')
     if not folded(id) then render_body() end
   end
@@ -687,11 +691,13 @@ local function render(m)
 
   -- ---- Branches (permanent) --------------------------------------------
   section('branches', 'Branches', #m.branches, function()
-    if #m.branches == 0 then return empty_row('(no branches)') end
+    -- for-each-ref trackshort, translated into the panel's glyph language:
+    -- in sync / ahead / behind / diverged
+    local TRACK_GLYPH = { ['='] = '✓', ['>'] = '↑', ['<'] = '↓', ['<>'] = '↕' }
     for _, b in ipairs(m.branches) do
       local marker = b.current and '*' or ' '
       local row = '     ' .. marker .. ' ' .. b.name
-      local tr = b.track ~= '' and b.track or ''
+      local tr = b.track ~= '' and (TRACK_GLYPH[b.track] or b.track) or ''
       if tr ~= '' then row = row .. '  ' .. tr end
       -- branch checked out in ANOTHER worktree: show which folder holds it
       if b.worktree and not b.current then
@@ -708,7 +714,6 @@ local function render(m)
 
   -- ---- Worktrees (permanent) -------------------------------------------
   section('worktrees', 'Worktrees', #m.worktrees, function()
-    if #m.worktrees == 0 then return empty_row('(no worktrees)') end
     for _, w in ipairs(m.worktrees) do
       local marker = w.current and '*' or ' '
       local flags = {}
@@ -726,11 +731,12 @@ local function render(m)
   local function divider(label, hint)
     local lnum = emit('── ' .. label .. ' ' .. string.rep('─', math.max(2, 40 - #label)),
       { kind = 'viewheader' }, 'GitPanelDivider')
-    emit('     ' .. hint, nil, 'GitPanelHint')
+    -- hint row only when it carries information the header hints don't
+    if hint then emit('     ' .. hint, nil, 'GitPanelHint') end
   end
 
   if M.view == 'work' then
-    divider('Staged / Unstaged', '<Tab> → Committed / Uncommitted')
+    divider('Staged / Unstaged')
     if m.op or #m.conflicts > 0 then
       section('conflicts', 'Conflicts', #m.conflicts, function()
         if #m.conflicts == 0 then
@@ -740,15 +746,12 @@ local function render(m)
       end)
     end
     section('staged', 'Staged', #m.staged, function()
-      if #m.staged == 0 then return empty_row('(nothing staged)') end
       for _, r in ipairs(m.staged) do file_row(r, 'staged', true) end
     end)
     section('unstaged', 'Unstaged', #m.unstaged, function()
-      if #m.unstaged == 0 then return empty_row('(nothing unstaged)') end
       for _, r in ipairs(m.unstaged) do file_row(r, 'unstaged', false) end
     end)
     section('untracked', 'Untracked', #m.untracked, function()
-      if #m.untracked == 0 then return empty_row('(no untracked files)') end
       for _, r in ipairs(m.untracked) do
         file_row({ x = '?', y = '?', path = r.path }, 'untracked', false)
       end
@@ -756,8 +759,9 @@ local function render(m)
     local ucount = (#m.unpushed > 50) and '50+' or #m.unpushed
     section('unpushed', 'Committed (not pushed)', ucount, function()
       if #m.unpushed == 0 then
-        return empty_row(m.has_remotes and '(nothing to push)' or
-          '(no remote configured — P to publish)')
+        -- the publish affordance is real information; plain emptiness is not
+        if not m.has_remotes then empty_row('(no remote configured — P to publish)') end
+        return
       end
       local shown = math.min(#m.unpushed, 50)
       for i = 1, shown do commit_row(m.unpushed[i], 'unpushed') end
@@ -766,11 +770,10 @@ local function render(m)
       end
     end)
     section('pushed', 'Pushed', #m.pushes, function()
-      if #m.pushes == 0 then return empty_row('(no pushes recorded)') end
       for _, e in ipairs(m.pushes) do push_row(e) end
     end)
   elseif M.view == 'history' then
-    divider('Committed / Uncommitted', '<Tab> → Staged / Unstaged')
+    divider('Committed / Uncommitted')
     section('uncommitted', 'Uncommitted', #m.uncommitted, function()
       if #m.uncommitted == 0 then return empty_row('(working tree clean)') end
       for _, r in ipairs(m.uncommitted) do file_row(r, 'uncommitted', r.x ~= '.' and r.x ~= '?') end
@@ -1193,17 +1196,36 @@ end
 
 -- Open text in a throwaway split. Git details default to filetype=git; remote
 -- repository summaries opt into Markdown without introducing a UI dependency.
+-- Diff/detail content opens in a centered float rather than a bottom split:
+-- it reads at full width, keeps the panel layout untouched, and `q` (or
+-- <Esc>) dismisses it without disturbing window arrangement.
 local function show_scratch(text, opts)
   opts = opts or {}
   local buf = api.nvim_create_buf(false, true)
-  api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(text or '', '\n', { plain = true }))
+  local text_lines = vim.split(text or '', '\n', { plain = true })
+  api.nvim_buf_set_lines(buf, 0, -1, false, text_lines)
   api.nvim_set_option_value('filetype', opts.filetype or 'git', { buf = buf })
   api.nvim_set_option_value('bufhidden', 'wipe', { buf = buf })
   if opts.name then pcall(api.nvim_buf_set_name, buf, opts.name) end
   api.nvim_set_option_value('modifiable', false, { buf = buf })
-  if M.mode == 'split' then vim.cmd('rightbelow vsplit') else vim.cmd('botright split') end
-  api.nvim_win_set_buf(0, buf)
-  vim.keymap.set('n', 'q', '<cmd>close<cr>', { buffer = buf, nowait = true, silent = true })
+  local width = math.max(40, math.min(110, vim.o.columns - 8))
+  local height = math.max(6, math.min(#text_lines + 1, vim.o.lines - 6))
+  local title = opts.title or (opts.name and opts.name:match('([^/]+)$'))
+  local win = api.nvim_open_win(buf, true, {
+    relative = 'editor',
+    width = width,
+    height = height,
+    col = math.floor((vim.o.columns - width) / 2),
+    row = math.max(1, math.floor((vim.o.lines - height) / 2) - 1),
+    style = 'minimal',
+    border = 'rounded',
+    title = title and (' ' .. title .. ' ') or nil,
+    title_pos = 'center',
+  })
+  vim.wo[win].wrap = false
+  for _, lhs in ipairs({ 'q', '<Esc>' }) do
+    vim.keymap.set('n', lhs, '<cmd>close<cr>', { buffer = buf, nowait = true, silent = true })
+  end
 end
 local function show_commit(sha)
   show_scratch(git({ 'show', '--stat', '--patch', sha }, { allow_fail = true }).stdout)
@@ -1287,6 +1309,130 @@ function M.open_github_browser()
   if not command then
     vim.notify('GitPanel: could not open ' .. item.url .. '\n' .. tostring(err or ''), vim.log.levels.WARN)
   end
+end
+
+-- ---- pull-request actions ----------------------------------------------------
+-- The review-and-land loop on a PR row: `go` check out, `gd` diff vs base,
+-- `gc` comment, `gm` merge (confirm; deletes the branch remote + local).
+-- Reads stay ambient; every write asks first.
+
+local function pull_under_cursor()
+  local item = cur_item()
+  if item and item.kind == 'github' and item.resource == 'pull' then return item end
+  vim.notify('GitPanel: cursor not on a pull request', vim.log.levels.INFO)
+  return nil
+end
+
+-- Client + repository for write calls; nil (with a notice) when GitHub is
+-- not resolvable here, so every action degrades to a no-op message.
+local function github_write_runtime()
+  resolve_github_runtime()
+  if github_runtime.client and github_runtime.repository then
+    return github_runtime.client, github_runtime.repository
+  end
+  vim.notify('GitPanel: GitHub is unavailable for this repository' ..
+    (github_runtime.repository_error and ('\n' .. github_runtime.repository_error) or ''),
+    vim.log.levels.WARN)
+  return nil
+end
+
+local function current_branch()
+  local res = git({ 'rev-parse', '--abbrev-ref', 'HEAD' }, { allow_fail = true })
+  return res.code == 0 and chomp(res.stdout) or ''
+end
+
+function M.pr_checkout()
+  local item = pull_under_cursor()
+  if not item then return end
+  local data = item.data
+  if not data.head then
+    return vim.notify('GitPanel: pull request #' .. tostring(data.number) ..
+      ' has no head branch (cross-fork PRs are not supported)', vim.log.levels.WARN)
+  end
+  local remote = (github_runtime.repository and github_runtime.repository.remote) or 'origin'
+  git({ 'fetch', remote })
+  M.checkout(data.head)
+end
+
+function M.pr_diff()
+  local item = pull_under_cursor()
+  if not item then return end
+  local data = item.data
+  if not (data.head and data.base) then
+    return vim.notify('GitPanel: pull request is missing branch information', vim.log.levels.WARN)
+  end
+  local remote = (github_runtime.repository and github_runtime.repository.remote) or 'origin'
+  git({ 'fetch', remote })
+  local range = remote .. '/' .. data.base .. '...' .. remote .. '/' .. data.head
+  local res = git({ 'diff', range }, { allow_fail = true })
+  if res.code ~= 0 then
+    return vim.notify('git diff ' .. range .. '\n' .. chomp(res.stderr), vim.log.levels.WARN)
+  end
+  local text = chomp(res.stdout)
+  if text == '' then text = '(no differences — the pull request may already be merged)' end
+  show_scratch(text, {
+    filetype = 'diff',
+    name = 'gitpanel://pull/' .. tostring(data.number) .. '.diff',
+  })
+end
+
+function M.pr_comment()
+  local item = pull_under_cursor()
+  if not item then return end
+  local data = item.data
+  local client, repository = github_write_runtime()
+  if not client then return end
+  vim.ui.input({ prompt = 'Comment on #' .. tostring(data.number) .. ': ' }, function(msg)
+    if not msg or trim(msg) == '' then return end
+    client:comment_pull(repository, data.number, msg, function(err)
+      if err then
+        return vim.notify('GitPanel: comment failed\n' .. err.message, vim.log.levels.ERROR)
+      end
+      vim.notify('GitPanel: commented on #' .. tostring(data.number), vim.log.levels.INFO)
+      M.refresh()
+    end)
+  end)
+end
+
+function M.pr_merge()
+  local item = pull_under_cursor()
+  if not item then return end
+  local data = item.data
+  local client, repository = github_write_runtime()
+  if not client then return end
+  if data.draft then
+    return vim.notify('GitPanel: #' .. tostring(data.number) .. ' is a draft — mark it ready first',
+      vim.log.levels.WARN)
+  end
+  local pick = fn.confirm(
+    'Merge pull request #' .. tostring(data.number) .. ' "' .. (data.title or '') .. '"\n' ..
+    'into ' .. (data.base or '?') .. '? The branch "' .. (data.head or '?') ..
+    '" is then deleted (remote and local).', '&No\n&Merge', 1)
+  if pick ~= 2 then return end
+
+  client:merge_pull(repository, data.number, function(err)
+    if err then
+      return vim.notify('GitPanel: merge failed\n' .. err.message, vim.log.levels.ERROR)
+    end
+    -- Best-effort branch cleanup: the merge itself already succeeded, so a
+    -- failure here is reported but never treated as a failed merge.
+    client:delete_branch(repository, data.head, function(ref_err)
+      if ref_err and ref_err.kind ~= 'not_found' then
+        vim.notify('GitPanel: merged, but the remote branch survived\n' .. ref_err.message,
+          vim.log.levels.WARN)
+      end
+      local remote = repository.remote or 'origin'
+      if current_branch() == data.head and data.base then
+        run({ 'switch', '--', data.base }, { quiet = true })
+        run({ 'pull', '--ff-only' }, { quiet = true })
+      end
+      git({ 'fetch', '--prune', remote }, { allow_fail = true })
+      git({ 'branch', '-d', data.head }, { allow_fail = true })
+      vim.notify('GitPanel: merged #' .. tostring(data.number) .. ' into ' .. (data.base or '?'),
+        vim.log.levels.INFO)
+      M.refresh()
+    end)
+  end)
 end
 
 function M.primary()
@@ -2026,6 +2172,10 @@ function M.attach_keys()
   k('L', M.toggle_layout, 'toggle tab/split')
   k('r', M.manual_refresh, 'refresh / synchronize')
   k('gx', M.open_github_browser, 'open GitHub item in browser')
+  k('go', M.pr_checkout, 'check out pull request branch')
+  k('gd', M.pr_diff, 'diff pull request against its base')
+  k('gc', M.pr_comment, 'comment on pull request')
+  k('gm', M.pr_merge, 'merge pull request (confirm; deletes branch)')
   k('q', M.close, 'close panel')
   k('g?', M.help, 'help')
   k('?', M.help, 'help')
