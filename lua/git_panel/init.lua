@@ -1,5 +1,39 @@
 -- Dependency-free Git dashboard. Public entry points: open(), close(), refresh().
 local api, fn, uv = vim.api, vim.fn, (vim.uv or vim.loop)
+local github = require('git_panel.github')
+local help_ui = require('git_panel.help')
+
+local VIEWS = {
+  { id = 'work', label = 'Changes' },
+  { id = 'history', label = 'History' },
+  { id = 'actions', label = 'Actions', github = true },
+  { id = 'issues', label = 'Issues', github = true },
+  { id = 'pulls', label = 'Pull Requests', github = true },
+}
+local VIEW_INDEX = {}
+for index, view in ipairs(VIEWS) do VIEW_INDEX[view.id] = index end
+
+local DEFAULT_CONFIG = {
+  help = {
+    border = 'rounded',
+    max_width = 88,
+  },
+  github = {
+    enabled = true,
+    transport = 'auto',
+    host = nil,
+    repository = nil,
+    api_url = nil,
+    api_version = '2026-03-10',
+    token_provider = nil,
+    refresh_interval = 60,
+    per_page = 30,
+    timeout = 15000,
+    gh_command = 'gh',
+    curl_command = 'curl',
+  },
+}
+
 local M = {
   buf = nil,
   win = nil,
@@ -10,10 +44,19 @@ local M = {
   line_map = {},     -- 1-indexed line number -> item descriptor
   prev_win = nil,    -- window we came from (for opening files)
   start_dir = nil,   -- dir used to locate the repo
+  config = vim.deepcopy(DEFAULT_CONFIG),
 }
 local PANEL_WIDTH = 48
 local ns = api.nvim_create_namespace('gitpanel')
 local home = uv.os_homedir() or ''
+local github_runtime = {
+  root = nil,
+  repository = nil,
+  repository_error = nil,
+  client = nil,
+  views = {},
+  generation = 0,
+}
 
 -- ---------------------------------------------------------------------------
 -- git runner: argv only (no shell), explicit cwd, stable locale, no locks.
@@ -45,6 +88,65 @@ local function nul_split(s)
   local t = {}
   for field in (s or ''):gmatch('([^%z]*)%z') do t[#t + 1] = field end
   return t
+end
+
+local function is_github_view(view)
+  local index = VIEW_INDEX[view]
+  return index and VIEWS[index].github == true or false
+end
+
+local function reset_github_runtime(root)
+  github_runtime.generation = github_runtime.generation + 1
+  github_runtime.root = root
+  github_runtime.repository = nil
+  github_runtime.repository_error = nil
+  github_runtime.client = nil
+  github_runtime.views = {}
+end
+
+local function github_state(view)
+  local state = github_runtime.views[view]
+  if not state then
+    state = { status = 'idle', items = {}, updated_at = nil, request_id = 0 }
+    github_runtime.views[view] = state
+  end
+  return state
+end
+
+local function resolve_github_runtime()
+  local opts = M.config.github
+  if not opts.enabled then
+    github_runtime.repository_error = 'GitHub integration is disabled in setup().'
+    return nil
+  end
+  if github_runtime.root ~= M.root then reset_github_runtime(M.root) end
+  if github_runtime.repository or github_runtime.repository_error then
+    return github_runtime.repository
+  end
+
+  local repository, err = github.resolve_repository(M.root, opts)
+  github_runtime.repository = repository
+  github_runtime.repository_error = err
+  if repository then
+    local client_opts = vim.tbl_deep_extend('force', vim.deepcopy(opts), { root = M.root })
+    local factory = opts.client_factory or github.new
+    github_runtime.client = factory(client_opts)
+  end
+  return repository
+end
+
+local function github_snapshot(view)
+  local repository = resolve_github_runtime()
+  local state = github_state(view)
+  return {
+    repository = repository,
+    repository_error = github_runtime.repository_error,
+    status = state.status,
+    items = state.items,
+    error = state.error,
+    updated_at = state.updated_at,
+    transport = state.transport,
+  }
 end
 
 local function remote_names()
@@ -352,8 +454,37 @@ local function render(m)
   end
   local hline = emit('  ' .. name .. '  on  ' .. hl, { kind = 'head' }, 'GitPanelHeader')
   span(hline, 2, 2 + #name, 'GitPanelTitle')
-  emit('  <Tab> switch view · s/u stage · S/C stage·commit all · g? help · q quit',
-    nil, 'GitPanelHint')
+
+  local function tab_line(first, last)
+    local text, tabs = '  ', {}
+    for index = first, last do
+      local view = VIEWS[index]
+      local label = '[' .. (view.id == M.view and '*' or ' ') .. ' ' .. index .. ' ' .. view.label .. ']'
+      if index > first then text = text .. '  ' end
+      local start_col = #text
+      text = text .. label
+      tabs[#tabs + 1] = { view = view, start_col = start_col, end_col = #text }
+    end
+    local line = emit(text)
+    for _, tab in ipairs(tabs) do
+      span(line, tab.start_col, tab.end_col,
+        tab.view.id == M.view and 'GitPanelTabActive' or 'GitPanelTabInactive')
+    end
+  end
+  if M.mode == 'split' then
+    tab_line(1, 3)
+    tab_line(4, 5)
+  else
+    tab_line(1, #VIEWS)
+  end
+  if is_github_view(M.view) then
+    emit('  <CR> details · gx browser · r sync · g? help · q quit', nil, 'GitPanelHint')
+  elseif M.mode == 'split' then
+    emit('  Tab cycle · 1–5 jump · g? help · q quit', nil, 'GitPanelHint')
+  else
+    emit('  <Tab>/<S-Tab> switch · 1–5 jump · s/u stage · g? help · q quit',
+      nil, 'GitPanelHint')
+  end
   -- in-progress merge/rebase/cherry-pick/revert banner
   if m.op then
     local OP = { merge = 'MERGING', rebase = 'REBASING',
@@ -451,6 +582,109 @@ local function render(m)
     end
   end
 
+  local function shorten(text, limit)
+    text = tostring(text or '')
+    if fn.strdisplaywidth(text) <= limit then return text end
+    local chars = fn.strchars(text)
+    while chars > 1 do
+      local candidate = fn.strcharpart(text, 0, chars - 1) .. '…'
+      if fn.strdisplaywidth(candidate) <= limit then return candidate end
+      chars = chars - 1
+    end
+    return '…'
+  end
+
+  local function one_line(text)
+    return trim(tostring(text or ''):gsub('%c', ' '):gsub('%s+', ' '))
+  end
+
+  local function row_limit()
+    if M.mode == 'split' then return PANEL_WIDTH - 3 end
+    return math.max(PANEL_WIDTH, math.min(vim.o.columns - 4, 120))
+  end
+
+  local function item_date(item)
+    local timestamp = item.updated_at or item.created_at
+    return timestamp and timestamp:sub(1, 10) or nil
+  end
+
+  local function github_map_item(item, section_id)
+    return {
+      kind = 'github',
+      resource = item.kind,
+      value = item.id,
+      section = section_id,
+      url = item.url,
+      data = item,
+    }
+  end
+
+  local ACTION_STATE = {
+    success = { '✓', 'GitPanelGitHubSuccess' },
+    failure = { '✗', 'GitPanelGitHubFailure' },
+    timed_out = { '!', 'GitPanelGitHubFailure' },
+    action_required = { '!', 'GitPanelGitHubFailure' },
+    cancelled = { '○', 'GitPanelGitHubMuted' },
+    skipped = { '○', 'GitPanelGitHubMuted' },
+    neutral = { '○', 'GitPanelGitHubMuted' },
+    in_progress = { '●', 'GitPanelGitHubRunning' },
+    queued = { '◌', 'GitPanelGitHubQueued' },
+    requested = { '◌', 'GitPanelGitHubQueued' },
+    waiting = { '◌', 'GitPanelGitHubQueued' },
+    pending = { '◌', 'GitPanelGitHubQueued' },
+  }
+
+  local function action_row(item)
+    local state = item.conclusion or item.status or 'unknown'
+    local state_style = ACTION_STATE[state] or { '?', 'GitPanelGitHubMuted' }
+    local prefix = '     ' .. state_style[1] .. '  '
+    local title = item.name .. (item.number and (' #' .. item.number) or '')
+    if item.title and item.title ~= item.name then title = title .. ' — ' .. item.title end
+    local metadata = { state:gsub('_', ' ') }
+    if item.branch then metadata[#metadata + 1] = item.branch end
+    if item.event then metadata[#metadata + 1] = item.event end
+    if item.actor then metadata[#metadata + 1] = '@' .. item.actor end
+    local date = item_date(item)
+    if date then metadata[#metadata + 1] = date end
+    local row = shorten(prefix .. title .. '  [' .. table.concat(metadata, ' · ') .. ']', row_limit())
+    local lnum = emit(row, github_map_item(item, 'github-actions'))
+    span(lnum, 5, 5 + #state_style[1], state_style[2])
+  end
+
+  local function issue_row(item)
+    local number = '#' .. tostring(item.number or '?')
+    local prefix = '     ' .. number .. '  '
+    local metadata = {}
+    if item.author then metadata[#metadata + 1] = '@' .. item.author end
+    if item.comments and item.comments > 0 then
+      metadata[#metadata + 1] = item.comments .. ' comment' .. (item.comments == 1 and '' or 's')
+    end
+    local labels = {}
+    for index = 1, math.min(2, #(item.labels or {})) do labels[#labels + 1] = item.labels[index] end
+    if #labels > 0 then metadata[#metadata + 1] = table.concat(labels, ', ') end
+    local date = item_date(item)
+    if date then metadata[#metadata + 1] = date end
+    local suffix = #metadata > 0 and ('  [' .. table.concat(metadata, ' · ') .. ']') or ''
+    local row = shorten(prefix .. item.title .. suffix, row_limit())
+    local lnum = emit(row, github_map_item(item, 'github-issues'))
+    span(lnum, 5, 5 + #number, 'GitPanelGitHubNumber')
+  end
+
+  local function pull_row(item)
+    local number = '#' .. tostring(item.number or '?')
+    local prefix = '     ' .. number .. '  '
+    local metadata = {}
+    if item.draft then metadata[#metadata + 1] = 'draft' end
+    if item.head or item.base then metadata[#metadata + 1] = (item.head or '?') .. ' → ' .. (item.base or '?') end
+    if item.author then metadata[#metadata + 1] = '@' .. item.author end
+    local date = item_date(item)
+    if date then metadata[#metadata + 1] = date end
+    local suffix = #metadata > 0 and ('  [' .. table.concat(metadata, ' · ') .. ']') or ''
+    local row = shorten(prefix .. item.title .. suffix, row_limit())
+    local lnum = emit(row, github_map_item(item, 'github-pulls'))
+    span(lnum, 5, 5 + #number, item.draft and 'GitPanelGitHubMuted' or 'GitPanelGitHubNumber')
+  end
+
   -- ---- Branches (permanent) --------------------------------------------
   section('branches', 'Branches', #m.branches, function()
     if #m.branches == 0 then return empty_row('(no branches)') end
@@ -535,7 +769,7 @@ local function render(m)
       if #m.pushes == 0 then return empty_row('(no pushes recorded)') end
       for _, e in ipairs(m.pushes) do push_row(e) end
     end)
-  else
+  elseif M.view == 'history' then
     divider('Committed / Uncommitted', '<Tab> → Staged / Unstaged')
     section('uncommitted', 'Uncommitted', #m.uncommitted, function()
       if #m.uncommitted == 0 then return empty_row('(working tree clean)') end
@@ -545,6 +779,57 @@ local function render(m)
       if #m.commits == 0 then return empty_row('(no commits yet)') end
       for _, c in ipairs(m.commits) do commit_row(c, 'committed') end
     end)
+  else
+    local view = VIEWS[VIEW_INDEX[M.view]] or { label = M.view }
+    local remote = m.github or {}
+    local repository = remote.repository
+    local location = repository and (repository.host .. '/' .. repository.repository)
+      or 'GitHub repository unavailable'
+    local sync = ''
+    if remote.status == 'loading' then
+      sync = ' · syncing…'
+    elseif remote.updated_at then
+      sync = ' · synced ' .. os.date('%H:%M:%S', remote.updated_at)
+      if remote.transport then sync = sync .. ' via ' .. remote.transport end
+    end
+    divider('GitHub ' .. view.label, location .. sync)
+
+    if remote.repository_error then
+      empty_row(one_line(remote.repository_error))
+      empty_row('Configure github.repository = "OWNER/REPO" for an explicit override.')
+    elseif remote.error and #(remote.items or {}) == 0 then
+      emit(shorten('     ⚠ ' .. one_line(remote.error.message), row_limit()),
+        nil, 'GitPanelGitHubFailure')
+      empty_row('Press r to retry; g? shows authentication and transport guidance.')
+    else
+      if remote.status == 'loading' then
+        emit('     ◌ Synchronizing without blocking Neovim…', nil, 'GitPanelGitHubQueued')
+      elseif remote.error then
+        emit(shorten('     ⚠ Showing cached data: ' .. one_line(remote.error.message), row_limit()),
+          nil, 'GitPanelGitHubFailure')
+      end
+
+      local items = remote.items or {}
+      local section_id = 'github-' .. M.view
+      local empty = {
+        actions = '(no workflow runs found)',
+        issues = '(no open issues)',
+        pulls = '(no open pull requests)',
+      }
+      local title = {
+        actions = 'Recent workflow runs',
+        issues = 'Open issues',
+        pulls = 'Open pull requests',
+      }
+      section(section_id, title[M.view] or view.label, #items, function()
+        if #items == 0 then return empty_row(empty[M.view] or '(nothing to show)') end
+        for _, item in ipairs(items) do
+          if M.view == 'actions' then action_row(item)
+          elseif M.view == 'issues' then issue_row(item)
+          else pull_row(item) end
+        end
+      end)
+    end
   end
 
   return lines, map, hls
@@ -558,6 +843,8 @@ local function define_hl()
   link('GitPanelHeader', 'Title')
   link('GitPanelTitle', 'Directory')
   link('GitPanelHint', 'Comment')
+  link('GitPanelTabActive', 'TabLineSel')
+  link('GitPanelTabInactive', 'TabLine')
   link('GitPanelSection', 'Statement')
   link('GitPanelDivider', 'Title')
   link('GitPanelBranchCurrent', 'Function')
@@ -573,6 +860,24 @@ local function define_hl()
   link('GitPanelSigNone', 'DiagnosticWarn')
   link('GitPanelSigUnknown', 'DiagnosticHint')
   link('GitPanelSigBad', 'DiagnosticError')
+  link('GitPanelGitHubSuccess', 'DiagnosticOk')
+  link('GitPanelGitHubFailure', 'DiagnosticError')
+  link('GitPanelGitHubRunning', 'DiagnosticInfo')
+  link('GitPanelGitHubQueued', 'DiagnosticHint')
+  link('GitPanelGitHubMuted', 'Comment')
+  link('GitPanelGitHubNumber', 'Special')
+  link('GitPanelHelpTitle', 'Title')
+  link('GitPanelHelpTitleAccent', 'Special')
+  link('GitPanelHelpBorder', 'FloatBorder')
+  link('GitPanelHelpIntro', 'Comment')
+  link('GitPanelHelpSection', 'Statement')
+  link('GitPanelHelpRule', 'WinSeparator')
+  link('GitPanelHelpKey', 'Special')
+  link('GitPanelHelpWarningKey', 'DiagnosticWarn')
+  link('GitPanelHelpDescription', 'NormalFloat')
+  link('GitPanelHelpWarning', 'DiagnosticWarn')
+  link('GitPanelHelpNote', 'Comment')
+  link('GitPanelHelpFooter', 'Comment')
 end
 
 -- ---------------------------------------------------------------------------
@@ -596,8 +901,70 @@ local function find_win()
   return nil
 end
 
-function M.refresh()
+local function request_github_view(view, force)
+  if not is_github_view(view) then return end
+  local state = github_state(view)
+  if state.status == 'loading' then return end
+  local previous_repository = github_runtime.repository and
+    (github_runtime.repository.host .. '/' .. github_runtime.repository.repository) or nil
+  if force then
+    github_runtime.generation = github_runtime.generation + 1
+    for _, pending in pairs(github_runtime.views) do
+      pending.request_id = pending.request_id + 1
+      if pending.status == 'loading' then
+        pending.status = #pending.items > 0 and 'stale' or 'idle'
+      end
+    end
+    github_runtime.repository = nil
+    github_runtime.repository_error = nil
+    github_runtime.client = nil
+  end
+  local repository = resolve_github_runtime()
+  local current_repository = repository and (repository.host .. '/' .. repository.repository) or nil
+  if force and previous_repository ~= current_repository then
+    github_runtime.views = {}
+    state = github_state(view)
+  end
+  if not repository or not github_runtime.client then return end
+
+  local refresh_interval = tonumber(M.config.github.refresh_interval) or 60
+  local fresh = state.updated_at and (os.time() - state.updated_at) < refresh_interval
+  if not force and state.status == 'ready' and fresh then return end
+
+  state.status = 'loading'
+  state.error = nil
+  state.request_id = state.request_id + 1
+  local request_id = state.request_id
+  local generation = github_runtime.generation
+  local root = M.root
+
+  github_runtime.client:fetch(view, repository, function(err, items, metadata)
+    vim.schedule(function()
+      if generation ~= github_runtime.generation or root ~= M.root
+          or request_id ~= state.request_id then return end
+      if err then
+        state.error = err
+        state.status = #state.items > 0 and 'stale' or 'error'
+      else
+        state.items = items or {}
+        state.error = nil
+        state.status = 'ready'
+        state.updated_at = os.time()
+        state.transport = metadata and metadata.transport or nil
+      end
+      if M.view == view and M.buf and api.nvim_buf_is_valid(M.buf) then
+        M.refresh({ skip_remote_fetch = true })
+      end
+    end)
+  end)
+end
+
+function M.refresh(opts)
+  opts = opts or {}
   if not (M.buf and api.nvim_buf_is_valid(M.buf)) then return end
+  if is_github_view(M.view) and not opts.skip_remote_fetch then
+    request_github_view(M.view, opts.force_remote == true)
+  end
   local win = find_win()
   -- remember the logical item under the cursor to restore it after rebuild
   local function item_key(it)
@@ -611,6 +978,7 @@ function M.refresh()
   end
 
   local model = gather()
+  if is_github_view(M.view) then model.github = github_snapshot(M.view) end
   local lines, map, hls = render(model)
   M.line_map = map
   with_writable(function() api.nvim_buf_set_lines(M.buf, 0, -1, false, lines) end)
@@ -678,6 +1046,26 @@ local function detect_root()
   return chomp(r.stdout)
 end
 
+function M.setup(opts)
+  if opts ~= nil and type(opts) ~= 'table' then
+    error('git_panel.setup() expects a table')
+  end
+  M.config = vim.tbl_deep_extend('force', vim.deepcopy(DEFAULT_CONFIG), opts or {})
+  local transport = M.config.github.transport
+  if transport ~= 'auto' and transport ~= 'gh' and transport ~= 'curl' then
+    error('git_panel.setup(): github.transport must be "auto", "gh", or "curl"')
+  end
+  M.config.github.per_page = math.max(1, math.min(100,
+    tonumber(M.config.github.per_page) or DEFAULT_CONFIG.github.per_page))
+  M.config.github.refresh_interval = math.max(0,
+    tonumber(M.config.github.refresh_interval) or DEFAULT_CONFIG.github.refresh_interval)
+  M.config.github.timeout = math.max(1000,
+    tonumber(M.config.github.timeout) or DEFAULT_CONFIG.github.timeout)
+  reset_github_runtime(M.root)
+  if M.buf and api.nvim_buf_is_valid(M.buf) then M.refresh() end
+  return M
+end
+
 function M.open(mode)
   mode = mode or 'tab'
   local root = detect_root()
@@ -686,6 +1074,7 @@ function M.open(mode)
       vim.log.levels.WARN)
     return
   end
+  if M.root ~= root then reset_github_runtime(root) end
   M.root = root
   ensure_buf()
   local existing = find_win()
@@ -729,9 +1118,25 @@ function M.toggle_layout()
   M.refresh()
 end
 
-function M.toggle_view()
-  M.view = (M.view == 'work') and 'history' or 'work'
+function M.select_view(view)
+  local index = type(view) == 'number' and view or VIEW_INDEX[view]
+  if not index or not VIEWS[index] then return end
+  M.view = VIEWS[index].id
   M.refresh()
+end
+
+function M.toggle_view(direction)
+  local current = VIEW_INDEX[M.view] or 1
+  local step = direction == -1 and -1 or 1
+  local target = ((current - 1 + step) % #VIEWS) + 1
+  M.select_view(target)
+end
+
+function M.previous_view() M.toggle_view(-1) end
+
+function M.manual_refresh()
+  if is_github_view(M.view) then M.refresh({ force_remote = true })
+  else M.refresh() end
 end
 
 function M.toggle_fold()
@@ -786,11 +1191,15 @@ local function open_file(path, jump_conflict)
   if jump_conflict then pcall(fn.search, '^<<<<<<<', 'cw') end
 end
 
--- open git output in a throwaway split, filetype=git, q to close
-local function show_scratch(text)
+-- Open text in a throwaway split. Git details default to filetype=git; remote
+-- repository summaries opt into Markdown without introducing a UI dependency.
+local function show_scratch(text, opts)
+  opts = opts or {}
   local buf = api.nvim_create_buf(false, true)
   api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(text or '', '\n', { plain = true }))
-  api.nvim_set_option_value('filetype', 'git', { buf = buf })
+  api.nvim_set_option_value('filetype', opts.filetype or 'git', { buf = buf })
+  api.nvim_set_option_value('bufhidden', 'wipe', { buf = buf })
+  if opts.name then pcall(api.nvim_buf_set_name, buf, opts.name) end
   api.nvim_set_option_value('modifiable', false, { buf = buf })
   if M.mode == 'split' then vim.cmd('rightbelow vsplit') else vim.cmd('botright split') end
   api.nvim_win_set_buf(0, buf)
@@ -816,6 +1225,70 @@ local function show_push(it)
   end
 end
 
+local function github_detail(item)
+  local data = item.data or {}
+  local lines = {}
+  local function add(label, value)
+    if value ~= nil and value ~= '' then lines[#lines + 1] = '- **' .. label .. ':** ' .. tostring(value) end
+  end
+
+  if item.resource == 'action' then
+    lines[#lines + 1] = '# ' .. (data.name or 'Workflow') ..
+      (data.number and (' #' .. data.number) or '')
+    lines[#lines + 1] = ''
+    add('Status', (data.conclusion or data.status or 'unknown'):gsub('_', ' '))
+    add('Run title', data.title)
+    add('Branch', data.branch)
+    add('Event', data.event)
+    add('Actor', data.actor and ('@' .. data.actor) or nil)
+    add('Commit', data.sha)
+    add('Updated', data.updated_at or data.created_at)
+    add('GitHub', data.url)
+  else
+    local noun = item.resource == 'pull' and 'Pull request' or 'Issue'
+    lines[#lines + 1] = '# ' .. noun .. ' #' .. tostring(data.number or '?') .. ': ' ..
+      (data.title or '(untitled)')
+    lines[#lines + 1] = ''
+    add('State', data.draft and 'draft' or data.state)
+    add('Author', data.author and ('@' .. data.author) or nil)
+    if item.resource == 'pull' then add('Branches', (data.head or '?') .. ' → ' .. (data.base or '?')) end
+    if data.labels and #data.labels > 0 then add('Labels', table.concat(data.labels, ', ')) end
+    add('Comments', data.comments)
+    add('Updated', data.updated_at or data.created_at)
+    add('GitHub', data.url)
+    lines[#lines + 1] = ''
+    lines[#lines + 1] = '## Description'
+    lines[#lines + 1] = ''
+    lines[#lines + 1] = data.body and data.body ~= '' and data.body or '_No description provided._'
+  end
+
+  lines[#lines + 1] = ''
+  lines[#lines + 1] = '_Read-only GitHub summary · press `q` to close · `gx` in the panel opens the browser._'
+  return table.concat(lines, '\n')
+end
+
+function M.open_github_detail()
+  local item = cur_item()
+  if not (item and item.kind == 'github') then
+    return vim.notify('GitPanel: cursor not on a GitHub item', vim.log.levels.INFO)
+  end
+  show_scratch(github_detail(item), {
+    filetype = 'markdown',
+    name = 'gitpanel://github/' .. item.resource .. '/' .. tostring(item.value),
+  })
+end
+
+function M.open_github_browser()
+  local item = cur_item()
+  if not (item and item.kind == 'github' and item.url) then
+    return vim.notify('GitPanel: cursor not on a GitHub item', vim.log.levels.INFO)
+  end
+  local command, err = vim.ui.open(item.url)
+  if not command then
+    vim.notify('GitPanel: could not open ' .. item.url .. '\n' .. tostring(err or ''), vim.log.levels.WARN)
+  end
+end
+
 function M.primary()
   local it = cur_item()
   if not it then return end
@@ -825,6 +1298,7 @@ function M.primary()
   elseif it.kind == 'file' then open_file(it.value, it.conflict)
   elseif it.kind == 'commit' then show_commit(it.value)
   elseif it.kind == 'push' then show_push(it)
+  elseif it.kind == 'github' then M.open_github_detail()
   elseif it.kind == 'op' then M.op_continue()
   end
 end
@@ -1287,6 +1761,7 @@ function M.switch_worktree(path)
     return vim.notify('GitPanel: worktree path missing: ' .. path, vim.log.levels.WARN)
   end
   vim.cmd('tcd ' .. fn.fnameescape(path))
+  if M.root ~= path then reset_github_runtime(path) end
   M.root = path
   vim.notify('GitPanel: switched to worktree ' .. tilde(path), vim.log.levels.INFO)
   M.refresh()
@@ -1503,55 +1978,8 @@ end
 function M.pull() run({ 'pull', '--ff-only' }); M.refresh() end
 function M.fetch() run({ 'fetch', '--all', '--prune' }); M.refresh() end
 
-local HELP = {
-  'Git Panel — keys',
-  '',
-  '  <Tab>   switch Changes view (Staged/Unstaged <-> Committed/Uncommitted)',
-  '  <CR>    act on item: section->fold, branch->checkout, worktree->switch,',
-  '          file->open, commit->show, push->show its commits',
-  '  za      fold / unfold section under cursor',
-  '',
-  '  s / u   stage / unstage file under cursor',
-  '  S / U   Stage All / Unstage All',
-  '  x       discard changes to file under cursor (confirm)',
-  '',
-  '  Conflicts (during a merge / rebase / cherry-pick / revert):',
-  '  <CR>    open the conflicted file at the first <<<<<<< marker',
-  '  o / t   resolve file under cursor: take ours / take theirs (then staged)',
-  '          (note: git inverts ours/theirs during a rebase — see the banner)',
-  '  s       mark the file resolved (git add) after editing it by hand',
-  '  >       continue / finish the operation (<op> --continue)',
-  '  A       abort the whole operation (confirm)',
-  '',
-  '  c       commit staged       C   Commit All (stage everything + commit)',
-  '  a       amend last commit',
-  '',
-  '  <CR>    (on a branch) checkout      b   new branch',
-  '  R       rename branch (choose local only, remote only, or both)',
-  '          remote default/protected branches may require a host setting change',
-  '  m       merge branch under cursor into current',
-  '  d       delete branch / remove worktree (context-sensitive)',
-  '  W       new worktree',
-  '',
-  '  F / P   pull (--ff-only) / push (publish if no remote)',
-  '  f       fetch --all --prune',
-  '  L       toggle layout (full tab <-> left split)',
-  '  r       refresh    g? / ?  this help    q   close',
-}
 function M.help()
-  local buf = api.nvim_create_buf(false, true)
-  api.nvim_buf_set_lines(buf, 0, -1, false, HELP)
-  api.nvim_set_option_value('modifiable', false, { buf = buf })
-  local width, height = 76, #HELP + 2
-  local win = api.nvim_open_win(buf, true, {
-    relative = 'editor', style = 'minimal', border = 'rounded',
-    width = width, height = height,
-    row = math.max(0, math.floor((vim.o.lines - height) / 2)),
-    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
-  })
-  api.nvim_set_option_value('cursorline', false, { win = win })
-  vim.keymap.set('n', 'q', '<cmd>close<cr>', { buffer = buf, nowait = true, silent = true })
-  vim.keymap.set('n', '<esc>', '<cmd>close<cr>', { buffer = buf, nowait = true, silent = true })
+  return help_ui.open(M.config.help)
 end
 
 function M.attach_keys()
@@ -1565,7 +1993,12 @@ function M.attach_keys()
   for _, lhs in ipairs({ '<CR>', '<NL>', '<kEnter>' }) do
     k(lhs, M.primary, 'primary action')
   end
-  k('<Tab>', M.toggle_view, 'switch Changes view')
+  k('<Tab>', M.toggle_view, 'next view')
+  k('<S-Tab>', M.previous_view, 'previous view')
+  for index = 1, #VIEWS do
+    local target = index
+    k(tostring(target), function() M.select_view(target) end, 'open ' .. VIEWS[target].label .. ' view')
+  end
   k('za', M.toggle_fold, 'fold/unfold section')
   k('s', M.stage, 'stage file')
   k('u', M.unstage, 'unstage file')
@@ -1591,7 +2024,8 @@ function M.attach_keys()
   k('F', M.pull, 'pull (--ff-only)')
   k('f', M.fetch, 'fetch')
   k('L', M.toggle_layout, 'toggle tab/split')
-  k('r', M.refresh, 'refresh')
+  k('r', M.manual_refresh, 'refresh / synchronize')
+  k('gx', M.open_github_browser, 'open GitHub item in browser')
   k('q', M.close, 'close panel')
   k('g?', M.help, 'help')
   k('?', M.help, 'help')

@@ -1,4 +1,4 @@
-*git-panel.txt* *git-panel.nvim*      Dependency-free Git dashboard for Neovim
+*git-panel.txt* *git-panel.nvim*      Git and GitHub dashboard for Neovim
 
 ==============================================================================
 CONTENTS                                                   *git-panel-contents*
@@ -6,16 +6,21 @@ CONTENTS                                                   *git-panel-contents*
 1. Requirements ....................................... |git-panel-requirements|
 2. Installation ....................................... |git-panel-installation|
 3. Commands ............................................... |git-panel-commands|
-4. Keys ....................................................... |git-panel-keys|
-5. Lua API ..................................................... |git-panel-api|
-6. Branches and support ........................... |git-panel-development|
+4. Views and keys ............................................ |git-panel-keys|
+5. GitHub integration ..................................... |git-panel-github|
+6. Lua API ..................................................... |git-panel-api|
+7. Branches and support ........................... |git-panel-development|
 
 ==============================================================================
 1. REQUIREMENTS                                           *git-panel-requirements*
 
-Neovim 0.10 or newer and the Git executable on $PATH. The plugin has no Lua
-dependencies. GitHub CLI (gh) is optional; when installed and authenticated it
-can create a GitHub repository during the first push.
+Neovim 0.10 or newer and the Git executable on $PATH. Local Git views have no
+Lua or Neovim plugin dependencies.
+
+GitHub repository views optionally use authenticated GitHub CLI (gh), or curl
+with a token provider for private repositories. Curl can read public
+repositories anonymously. GitHub CLI also enables GitHub repository creation
+during a first push.
 
 ==============================================================================
 2. INSTALLATION                                             *git-panel-installation*
@@ -30,6 +35,8 @@ With lazy.nvim: >lua
 The default bet branch is production. Release tags provide immutable versions;
 the persistent bluff branch contains integration work.
 
+Calling setup() is optional. See |git-panel-github| for configuration.
+
 ==============================================================================
 3. COMMANDS                                                     *git-panel-commands*
 
@@ -37,45 +44,151 @@ the persistent bluff branch contains integration work.
 :GitPanelSplit        Open the dashboard as a left split.
 
 ==============================================================================
-4. KEYS                                                             *git-panel-keys*
+4. VIEWS AND KEYS                                                   *git-panel-keys*
+
+The view bar contains:
+
+1 Changes       Staged, unstaged, untracked, unpushed, and pushed work.
+2 History       Uncommitted files and recent commits.
+3 Actions       Recent GitHub Actions workflow runs.
+4 Issues        Open GitHub issues (pull requests are excluded).
+5 Pull Requests Open GitHub pull requests.
 
 The following mappings are local to the panel buffer:
 
-<Tab>       Toggle Staged/Unstaged and Committed/Uncommitted views.
-<CR>        Act on the current section, branch, worktree, file, commit, or push.
+<Tab>          Move to the next view.
+<S-Tab>        Move to the previous view.
+1 .. 5         Jump directly to a numbered view.
+<CR>           Act on a section, branch, worktree, file, commit, push, or
+               GitHub item. GitHub items open a Markdown summary in Neovim.
 <NL>/<kEnter>  The LF and keypad forms of Enter perform the same action.
-za          Fold or unfold the current section.
-s / u       Stage or unstage the current file.
-S / U       Stage all or unstage all.
-x           Discard the current file's changes after confirmation.
-o / t       Resolve a conflict by taking ours or theirs, then stage it.
-> / A       Continue or abort an in-progress Git operation.
-c / C       Commit staged changes or stage everything and commit.
-a           Amend the last commit.
-b / R / d   Create, rename, or delete a branch.
-m           Merge the branch under the cursor into the current branch.
-W           Create a worktree.
-F / P / f   Pull with --ff-only, push/publish, or fetch all remotes and prune.
-            With no remote, P can create a GitHub repo using gh or attach an
-            existing remote URL as origin, then push with upstream tracking.
-L           Toggle full-tab and left-split layouts.
-r           Refresh.
-? / g?      Open the in-panel help window.
-q           Close the panel.
+za             Fold or unfold the current section.
+s / u          Stage or unstage the current file.
+S / U          Stage all or unstage all.
+x              Discard the current file changes after confirmation.
+o / t          Resolve a conflict by taking ours or theirs, then stage it.
+> / A          Continue or abort an in-progress Git operation.
+c / C          Commit staged changes or stage everything and commit.
+a              Amend the last commit.
+b / R / d      Create, rename, or delete a branch.
+m              Merge the branch under the cursor into the current branch.
+W              Create a worktree.
+F / P / f      Pull with --ff-only, push/publish, or fetch and prune.
+               With no remote, P can create a GitHub repo using gh or attach
+               an existing remote URL as origin, then push with tracking.
+gx             Open the selected GitHub item in the system browser.
+L              Toggle full-tab and left-split layouts.
+r              Refresh locally, or force a GitHub synchronization.
+? / g?         Open the structured, highlighted, scrollable key guide.
+q              Close the panel. In a detail or key-guide window, close it.
+
+Conflict workflows show the rebase-specific meaning of ours/theirs in the
+operation banner. Remote branch renames use leases and avoid overwriting an
+unrelated ref.
 
 ==============================================================================
-5. LUA API                                                           *git-panel-api*
+5. GITHUB INTEGRATION                                         *git-panel-github*
+
+Actions, Issues, and Pull Requests are read-only. Entering one of these views
+never blocks the Neovim UI. Cached data renders immediately; a background
+request begins when the cache is stale. The panel distinguishes loading, empty,
+stale, authentication, permission, rate-limit, network, and transport states.
+
+GitPanel detects GitHub.com and *.ghe.com SSH/HTTPS remotes, preferring origin.
+Set github.host to identify a custom GitHub Enterprise Server host, or set
+github.repository to OWNER/REPO when remote discovery is unsuitable.
+
+Default configuration: >lua
+
+    require("git_panel").setup({
+      help = {
+        border = "rounded",
+        max_width = 88,
+      },
+      github = {
+        enabled = true,
+        transport = "auto",       -- "auto", "gh", or "curl"
+        repository = nil,          -- "OWNER/REPO"
+        host = nil,                -- custom GitHub host
+        api_url = nil,             -- custom HTTPS REST base; auto selects curl
+        api_version = "2026-03-10",
+        refresh_interval = 60,     -- seconds
+        per_page = 30,             -- 1..100
+        timeout = 15000,           -- milliseconds
+        token_provider = nil,
+        gh_command = "gh",
+        curl_command = "curl",
+      },
+    })
+<
+The auto transport tries gh first, then curl. An ordinary authenticated gh
+session requires no token configuration. GH_TOKEN, GITHUB_TOKEN, GH_HOST, and
+the corresponding Enterprise variables follow GitHub CLI's own behavior.
+
+TOKEN PROVIDERS                                      *git-panel-github-auth*
+
+The curl transport requires a bearer token for private repositories. A provider
+may synchronously return a GitHub App user token, installation token, fine-
+grained personal access token, or another accepted bearer token: >lua
+
+    require("git_panel").setup({
+      github = {
+        transport = "curl",
+        token_provider = function(context)
+          return vim.env.GITHUB_TOKEN
+        end,
+      },
+    })
+<
+An asynchronous provider accepts (context, done), returns true, then calls
+done(token, error). This supports helpers that mint an installation token when
+the previous token has expired: >lua
+
+    token_provider = function(context, done)
+      vim.system({ "my-app-token-helper", context.repository },
+        { text = true }, function(result)
+          vim.schedule(function()
+            if result.code == 0 then
+              done(vim.trim(result.stdout))
+            else
+              done(nil, "GitHub App token helper failed")
+            end
+          end)
+        end)
+      return true
+    end
+<
+The context contains host, owner, name, and repository. GitPanel invokes the
+provider for every request batch and never persists or displays the result.
+Provider tokens are not placed in process arguments: gh receives one through
+its environment; curl receives the authorization header over standard input,
+ignores user-level curl configuration, and does not follow redirects.
+
+A raw GitHub App private key is deliberately unsupported. The private key signs
+a JWT used to mint an installation access token and should remain in an external
+helper or vault. Installation tokens expire after one hour.
+
+For these read-only views a GitHub App needs repository Actions: read,
+Issues: read, and Pull requests: read permissions. Public resources may be read
+without a token, subject to GitHub's anonymous API limits.
+
+==============================================================================
+6. LUA API                                                           *git-panel-api*
 
 The module is returned by: >lua
 
     local git_panel = require("git_panel")
+    git_panel.setup({})      -- optional
     git_panel.open("tab")    -- or "split"
+    git_panel.select_view(3) -- Actions
     git_panel.refresh()
     git_panel.close()
 <
+setup() validates transport and numeric GitHub settings. Calling it again resets
+remote caches and keeps an open panel synchronized with the new configuration.
 
 ==============================================================================
-6. BRANCHES AND SUPPORT                                      *git-panel-development*
+7. BRANCHES AND SUPPORT                                      *git-panel-development*
 
 Linux is tested on Neovim 0.10, 0.11, and 0.12. macOS is smoke-tested on the
 current stable Neovim. Platform behavior is not separated into OS branches or

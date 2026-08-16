@@ -18,6 +18,7 @@ Run these from the repository root with Neovim 0.10 or newer:
 
 ```sh
 nvim --headless --clean -l scripts/check-lua.lua .
+nvim --headless -u tests/minimal_init.lua -l tests/unit.lua
 nvim --headless -u tests/minimal_init.lua -l tests/smoke.lua
 nvim --headless -u tests/minimal_init.lua -c "helptags doc" -c quit
 git diff --check
@@ -27,6 +28,10 @@ git diff --exit-code -- doc/tags
 Keep the plugin dependency-free unless a proposal demonstrates that a new
 dependency materially improves the core Git workflow. Add a smoke assertion or
 focused reproduction for bug fixes when practical.
+
+GitHub provider tests must use deterministic fake transports. Never put a real
+token, private key, refresh token, or credential-shaped fixture in the test
+suite or command arguments.
 
 Use [Discussions](https://github.com/777lotto/git-panel.nvim/discussions) for
 questions, setup showcases, and exploratory ideas. Open an Issue when work is
