@@ -235,9 +235,99 @@ local function test_help_rendering()
   vim.api.nvim_win_close(win, true)
 end
 
+local function test_pull_request_mutations()
+  local repository = {
+    host = "github.com",
+    owner = "octo",
+    name = "widgets",
+    repository = "octo/widgets",
+  }
+  local token = "test_token_for_mutations"
+
+  local function stub_client(transport, response)
+    local capture = {}
+    local client = github.new({
+      transport = transport,
+      token_provider = function() return token end,
+      executable = function(command) return command == transport end,
+      schedule = function(callback) callback() end,
+      defer = function() end,
+      spawn = function(command, opts, callback)
+        capture.command, capture.opts = command, opts
+        callback(response)
+        return {}
+      end,
+    })
+    return client, capture
+  end
+
+  -- merge over gh: method + endpoint + JSON body on stdin, never in argv
+  local client, capture = stub_client("gh", {
+    code = 0, stdout = vim.json.encode({ merged = true }), stderr = "",
+  })
+  local merged
+  client:merge_pull(repository, 7, function(err, payload)
+    assert(not err, vim.inspect(err))
+    merged = payload
+  end)
+  assert(merged and merged.merged, "merge_pull callback did not deliver the payload")
+  local rendered = table.concat(capture.command, " ")
+  contains(rendered, "--method PUT")
+  contains(rendered, "repos/octo/widgets/pulls/7/merge")
+  contains(capture.opts.stdin, "merge_method")
+  assert(not rendered:find(token, 1, true), "token leaked into gh mutation arguments")
+
+  -- branch delete over curl: DELETE with an empty 204 body succeeds with nil data
+  local curl_client, curl_capture = stub_client("curl", {
+    code = 0, stdout = "\n204", stderr = "",
+  })
+  local deleted, delete_payload = false, "sentinel"
+  curl_client:delete_branch(repository, "claude/workstation-topic", function(err, payload)
+    assert(not err, vim.inspect(err))
+    deleted, delete_payload = true, payload
+  end)
+  assert(deleted, "delete_branch callback did not run")
+  assert(delete_payload == nil, "an empty 204 response should decode to nil")
+  local curl_rendered = table.concat(curl_capture.command, " ")
+  contains(curl_rendered, "--request DELETE")
+  contains(curl_rendered, "git/refs/heads/claude/workstation-topic")
+  contains(curl_capture.opts.stdin, "Authorization: Bearer " .. token)
+
+  -- comment posts to the issues conversation endpoint
+  local comment_client, comment_capture = stub_client("gh", {
+    code = 0, stdout = vim.json.encode({ id = 1 }), stderr = "",
+  })
+  local commented
+  comment_client:comment_pull(repository, 7, "applied: 19 ok", function(err)
+    assert(not err, vim.inspect(err))
+    commented = true
+  end)
+  assert(commented, "comment_pull callback did not run")
+  contains(table.concat(comment_capture.command, " "), "repos/octo/widgets/issues/7/comments")
+  contains(comment_capture.opts.stdin, "applied: 19 ok")
+
+  -- guards fail closed without spawning anything
+  local guard_client = github.new({
+    transport = "gh",
+    executable = function() return true end,
+    schedule = function(callback) callback() end,
+    defer = function() end,
+    spawn = function() error("guarded mutation must not spawn") end,
+  })
+  local guard_errors = {}
+  guard_client:delete_branch(repository, "../evil", function(err) guard_errors[#guard_errors + 1] = err end)
+  guard_client:comment_pull(repository, 7, "   ", function(err) guard_errors[#guard_errors + 1] = err end)
+  guard_client:merge_pull(repository, nil, function(err) guard_errors[#guard_errors + 1] = err end)
+  equal(#guard_errors, 3, "unsafe mutations must be rejected before spawning")
+  for _, err in ipairs(guard_errors) do
+    equal(err.kind, "configuration")
+  end
+end
+
 test_remote_parsing()
 test_normalization()
 test_transports_and_redaction()
+test_pull_request_mutations()
 test_help_rendering()
 
 print("GitPanel unit tests passed")
