@@ -385,7 +385,7 @@ function Client:_spawn(command, opts, callback)
   return ok and job_or_error or nil
 end
 
-function Client:_request_gh(repository, endpoint, token, callback)
+function Client:_request_gh(repository, spec, token, callback)
   local version, version_error = api_version(self.opts)
   if not version then
     return callback({ kind = 'configuration', message = version_error })
@@ -394,26 +394,37 @@ function Client:_request_gh(repository, endpoint, token, callback)
     self.opts.gh_command or 'gh', 'api', '--hostname', repository.host,
     '--header', 'Accept: application/vnd.github+json',
     '--header', 'X-GitHub-Api-Version: ' .. version,
-    endpoint,
   }
+  if spec.method and spec.method ~= 'GET' then
+    command[#command + 1] = '--method'
+    command[#command + 1] = spec.method
+  end
+  local stdin
+  if spec.body ~= nil then
+    command[#command + 1] = '--input'
+    command[#command + 1] = '-'
+    stdin = vim.json.encode(spec.body)
+  end
+  command[#command + 1] = spec.endpoint
   local env = {}
   if token then
     if is_cloud_host(repository.host) then env.GH_TOKEN = token
     else env.GH_ENTERPRISE_TOKEN = token end
   end
 
-  self:_spawn(command, { text = true, cwd = self.opts.root, env = env,
+  self:_spawn(command, { text = true, cwd = self.opts.root, env = env, stdin = stdin,
     timeout = self.opts.timeout or 15000 }, function(result)
     if result.code ~= 0 then
       local detail = trim((result.stderr or '') ~= '' and result.stderr or result.stdout)
       return callback(classify_error(nil, detail, 'gh', { token }))
     end
+    if trim(result.stdout) == '' then return callback(nil, nil) end
     local decoded, decode_error = decode_json(result.stdout, 'gh', { token })
     callback(decode_error, decoded)
   end)
 end
 
-function Client:_request_curl(repository, endpoint, token, callback)
+function Client:_request_curl(repository, spec, token, callback)
   local version, version_error = api_version(self.opts)
   if not version then
     return callback({ kind = 'configuration', message = version_error })
@@ -425,7 +436,7 @@ function Client:_request_curl(repository, endpoint, token, callback)
       message = 'github.api_url must be an HTTPS REST base without a query or fragment.',
     })
   end
-  local url = base_url .. '/' .. endpoint
+  local url = base_url .. '/' .. spec.endpoint
   local config = {
     'header = "Accept: application/vnd.github+json"',
     'header = "X-GitHub-Api-Version: ' .. version .. '"',
@@ -438,6 +449,18 @@ function Client:_request_curl(repository, endpoint, token, callback)
     '--config', '-', '--max-time', tostring(timeout_seconds),
     '--write-out', '\n%{http_code}', '--url', url,
   }
+  if spec.method and spec.method ~= 'GET' then
+    command[#command + 1] = '--request'
+    command[#command + 1] = spec.method
+  end
+  if spec.body ~= nil then
+    -- The body is never a secret (titles, comments, branch names); only the
+    -- Authorization header is, and that stays on the stdin config channel.
+    command[#command + 1] = '--data'
+    command[#command + 1] = vim.json.encode(spec.body)
+    command[#command + 1] = '--header'
+    command[#command + 1] = 'Content-Type: application/json'
+  end
 
   self:_spawn(command, { text = true, cwd = self.opts.root,
     stdin = table.concat(config, '\n') .. '\n', timeout = timeout }, function(result)
@@ -452,19 +475,13 @@ function Client:_request_curl(repository, endpoint, token, callback)
     if status < 200 or status >= 300 then
       return callback(classify_error(status, body, 'curl', { token }))
     end
+    if trim(body) == '' then return callback(nil, nil) end
     local decoded, decode_error = decode_json(body, 'curl', { token })
     callback(decode_error, decoded)
   end)
 end
 
-function Client:fetch(view, repository, callback)
-  local per_page = math.max(1, math.min(100, math.floor(tonumber(self.opts.per_page) or 30)))
-  local endpoint = endpoint_for(view, repository, per_page)
-  local normalize = NORMALIZERS[view]
-  if not endpoint or not normalize then
-    return callback({ kind = 'configuration', message = 'Unknown GitHub view: ' .. tostring(view) })
-  end
-
+function Client:_dispatch(spec, repository, callback)
   self:_with_token(repository, function(token, token_error)
     if token_error then
       return callback({ kind = 'authentication', message = M.redact(token_error, { token }) })
@@ -498,22 +515,90 @@ function Client:fetch(view, repository, callback)
     local function attempt()
       local transport = transports[index]
       local request = transport == 'gh' and self._request_gh or self._request_curl
-      request(self, repository, endpoint, token, function(err, payload)
+      request(self, repository, spec, token, function(err, payload)
         if err then
           last_error = err
           index = index + 1
           if index <= #transports then return attempt() end
           return callback(last_error)
         end
-        local ok, items = pcall(normalize, payload)
-        if not ok then
-          return callback({ kind = 'decode', message = 'Could not normalize GitHub response: ' .. M.redact(items) })
-        end
-        callback(nil, items, { transport = transport })
+        callback(nil, payload, { transport = transport })
       end)
     end
     attempt()
   end)
+end
+
+function Client:fetch(view, repository, callback)
+  local per_page = math.max(1, math.min(100, math.floor(tonumber(self.opts.per_page) or 30)))
+  local endpoint = endpoint_for(view, repository, per_page)
+  local normalize = NORMALIZERS[view]
+  if not endpoint or not normalize then
+    return callback({ kind = 'configuration', message = 'Unknown GitHub view: ' .. tostring(view) })
+  end
+
+  self:_dispatch({ endpoint = endpoint }, repository, function(err, payload, meta)
+    if err then return callback(err) end
+    local ok, items = pcall(normalize, payload)
+    if not ok then
+      return callback({ kind = 'decode', message = 'Could not normalize GitHub response: ' .. M.redact(items) })
+    end
+    callback(nil, items, meta)
+  end)
+end
+
+-- ---- write operations (pull-request actions) ---------------------------------
+-- Every mutation is a REST call through the same transport chain as fetch;
+-- callers confirm with the user BEFORE reaching this layer.
+
+local MUTATION_METHODS = { POST = true, PUT = true, PATCH = true, DELETE = true }
+
+function Client:mutate(spec, repository, callback)
+  if not MUTATION_METHODS[spec.method or ''] then
+    return callback({ kind = 'configuration', message = 'Unsupported mutation method: ' .. tostring(spec.method) })
+  end
+  self:_dispatch(spec, repository, callback)
+end
+
+local function valid_pull_number(number)
+  return type(number) == 'number' and number > 0 and number == math.floor(number)
+end
+
+function Client:merge_pull(repository, number, callback)
+  if not valid_pull_number(number) then
+    return callback({ kind = 'configuration', message = 'merge_pull needs a pull request number' })
+  end
+  self:mutate({
+    method = 'PUT',
+    endpoint = 'repos/' .. repository.repository .. '/pulls/' .. number .. '/merge',
+    body = { merge_method = 'merge' },
+  }, repository, callback)
+end
+
+function Client:comment_pull(repository, number, body, callback)
+  if not valid_pull_number(number) then
+    return callback({ kind = 'configuration', message = 'comment_pull needs a pull request number' })
+  end
+  if trim(body) == '' then
+    return callback({ kind = 'configuration', message = 'comment_pull refuses an empty comment' })
+  end
+  self:mutate({
+    method = 'POST',
+    -- PR conversation comments live on the issues endpoint (review comments differ).
+    endpoint = 'repos/' .. repository.repository .. '/issues/' .. number .. '/comments',
+    body = { body = body },
+  }, repository, callback)
+end
+
+function Client:delete_branch(repository, branch, callback)
+  branch = trim(branch)
+  if branch == '' or branch:find('%.%.') or not branch:match('^[%w][%w/_.%-]*$') then
+    return callback({ kind = 'configuration', message = 'delete_branch refuses unsafe branch name' })
+  end
+  self:mutate({
+    method = 'DELETE',
+    endpoint = 'repos/' .. repository.repository .. '/git/refs/heads/' .. branch,
+  }, repository, callback)
 end
 
 M.Client = Client

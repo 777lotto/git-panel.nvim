@@ -5,9 +5,10 @@
 [![Release](https://img.shields.io/github/v/release/777lotto/git-panel.nvim)](https://github.com/777lotto/git-panel.nvim/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A dependency-free local Git dashboard for Neovim with optional, read-only
-GitHub repository views. It keeps branches, worktrees, changes, conflicts,
-commits, workflow runs, issues, and pull requests in one keyboard-driven panel.
+A dependency-free local Git dashboard for Neovim with optional GitHub
+repository views. It keeps branches, worktrees, changes, conflicts, commits,
+workflow runs, issues, and pull requests in one keyboard-driven panel — and
+lets you review, comment on, and merge pull requests without leaving it.
 
 ## Highlights
 
@@ -87,6 +88,8 @@ point is `require("git_panel").open("tab")` or `.open("split")`.
 | `L` | Toggle tab and split layouts |
 | `r` | Refresh locally or synchronize the active GitHub view |
 | `gx` | Open the selected GitHub item in a browser |
+| `go` / `gd` | Check out / diff the selected pull request against its base |
+| `gc` / `gm` | Comment on / merge the selected pull request (confirm; deletes its branch) |
 | `?` / `g?` | Show the highlighted, scrollable key guide |
 | `q` | Close |
 
@@ -107,7 +110,8 @@ upstream tracking.
 
 ## GitHub repository views
 
-The Actions, Issues, and Pull Requests views are read-only. GitPanel resolves
+The Actions and Issues views are read-only; the Pull Requests view adds
+review-and-land actions that always confirm before writing. GitPanel resolves
 the current repository from a GitHub.com or `*.ghe.com` remote, preferring
 `origin`, then caches each view independently. Opening a view renders cached
 content immediately and starts a background refresh when the cache is stale.
@@ -121,6 +125,12 @@ states are shown inside the panel.
 - Pull Requests shows open PRs, draft state, head/base branches, author, and
   update date.
 - `<CR>` opens a Markdown summary in Neovim; `gx` opens the canonical GitHub URL.
+- On a pull-request row: `go` fetches and checks out the head branch, `gd`
+  opens the full `base...head` diff in a buffer, `gc` posts a conversation
+  comment, and `gm` merges (merge commit), deletes the remote branch, prunes,
+  and — when you were on the PR branch — returns you to the base branch and
+  fast-forwards it. Merging requires a credential with write permission;
+  read-only tokens keep the view itself working and simply fail the write.
 
 Zero-configuration `gh` authentication is the preferred path: run
 `gh auth login`, or provide one of the token environment variables supported by
@@ -191,7 +201,9 @@ require("git_panel").setup({
 
 GitHub App user access tokens and installation access tokens are supported as
 bearer tokens. The App needs repository **Actions: read**, **Issues: read**, and
-**Pull requests: read** permissions. A raw App private key is deliberately not
+**Pull requests: read** permissions — plus **Pull requests: write** and
+**Contents: write** if you use the `gc`/`gm` pull-request actions. A raw App
+private key is deliberately not
 accepted: it is a long-lived signing credential used to mint an installation
 token, and should stay in an external helper or vault. Installation tokens
 expire after one hour, so GitPanel invokes the provider for every request batch.
