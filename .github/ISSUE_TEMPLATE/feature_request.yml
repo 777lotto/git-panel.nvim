@@ -15,6 +15,7 @@ body:
         - Branches and merging
         - Worktrees
         - Remotes and publishing
+        - GitHub integration
         - Conflict resolution
         - Documentation
     validations:

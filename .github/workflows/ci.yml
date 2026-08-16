@@ -79,6 +79,9 @@ jobs:
       - name: Compile every Lua file
         run: nvim --headless --clean -l scripts/check-lua.lua .
 
+      - name: Run focused renderer and GitHub provider tests
+        run: nvim --headless -u tests/minimal_init.lua -l tests/unit.lua
+
       - name: Run isolated Git fixture smoke test
         run: nvim --headless -u tests/minimal_init.lua -l tests/smoke.lua
 
@@ -126,6 +129,9 @@ jobs:
 
       - name: Compile every Lua file
         run: nvim --headless --clean -l scripts/check-lua.lua .
+
+      - name: Run focused renderer and GitHub provider tests
+        run: nvim --headless -u tests/minimal_init.lua -l tests/unit.lua
 
       - name: Run isolated Git fixture smoke test
         run: nvim --headless -u tests/minimal_init.lua -l tests/smoke.lua
