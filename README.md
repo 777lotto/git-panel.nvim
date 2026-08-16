@@ -115,6 +115,14 @@ not split into operating-system branches or GitHub Environments.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and pull-request guidance.
 
+## Community and roadmap
+
+Use [Issues](https://github.com/777lotto/git-panel.nvim/issues) for reproducible,
+actionable work. Questions, setup showcases, and exploratory ideas belong in
+[Discussions](https://github.com/777lotto/git-panel.nvim/discussions). Work that
+spans this plugin and `nvim-config` is planned in the public
+[Neovim Workspace](https://github.com/users/777lotto/projects/5).
+
 ## Project layout
 
 ```text

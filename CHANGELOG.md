@@ -4,6 +4,12 @@ Notable changes are recorded here. Releases follow semantic versioning.
 
 ## Unreleased
 
+### Changed
+
+- Repository links now distinguish actionable Issues from community Discussions
+  and connect cross-repository work to Neovim Workspace.
+- GitHub Actions use `actions/checkout` v7.
+
 ## 0.1.0 - 2026-08-15
 
 ### Added
