@@ -28,5 +28,10 @@ Keep the plugin dependency-free unless a proposal demonstrates that a new
 dependency materially improves the core Git workflow. Add a smoke assertion or
 focused reproduction for bug fixes when practical.
 
+Use [Discussions](https://github.com/777lotto/git-panel.nvim/discussions) for
+questions, setup showcases, and exploratory ideas. Open an Issue when work is
+reproducible and actionable. Cross-repository work is planned in the public
+[Neovim Workspace](https://github.com/users/777lotto/projects/5).
+
 Commits should be signed with a GitHub-verified GPG, SSH, or S/MIME signature.
 Open the pull request into `bluff`, complete the checklist, and wait for CI.
