@@ -4,11 +4,31 @@ Notable changes are recorded here. Releases follow semantic versioning.
 
 ## Unreleased
 
+### Added
+
+- Read-only Actions, Issues, and Pull Requests views with asynchronous `gh` and
+  curl transports, per-repository caches, explicit loading/error states, and
+  in-editor or browser details.
+- GitHub.com, GHE.com, and configured GitHub Enterprise remote discovery.
+- `setup()` options for GitHub transport, repository overrides, cache timing,
+  and synchronous or asynchronous short-lived token providers.
+- Focused provider, response-normalization, redaction, and help-renderer tests.
+
 ### Changed
 
+- The panel now exposes five views with forward/reverse tab cycling and numeric
+  navigation.
+- The `?` key guide is structured, semantically highlighted, responsive, and
+  scrollable on shorter editors.
 - Repository links now distinguish actionable Issues from community Discussions
   and connect cross-repository work to Neovim Workspace.
 - GitHub Actions use `actions/checkout` v7.
+
+### Security
+
+- GitHub credentials are never persisted, rendered, notified, or placed in
+  process arguments. Raw GitHub App private keys remain outside Neovim; curl
+  authorization headers travel over standard input.
 
 ## 0.1.0 - 2026-08-15
 
