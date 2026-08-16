@@ -140,6 +140,53 @@ local function run()
     "Pull Requests view did not render async fixture")
   assert_contains(panel_text(), "Add repository views")
 
+  local stale_callbacks = {}
+  panel.setup({
+    github = {
+      repository = "octo/old-repository",
+      client_factory = function()
+        return {
+          fetch = function(_, view, _, callback) stale_callbacks[view] = callback end,
+        }
+      end,
+    },
+  })
+  panel.select_view(3)
+  assert(stale_callbacks.actions, "stale-response fixture did not capture the old request")
+
+  panel.setup({
+    github = {
+      repository = "octo/current-repository",
+      client_factory = function()
+        return {
+          fetch = function(_, _, _, callback)
+            vim.schedule(function()
+              callback(nil, {
+                {
+                  kind = "action", id = "current", number = 18, name = "Current generation",
+                  title = "accepted response", status = "completed", conclusion = "success",
+                },
+              }, { transport = "fixture" })
+            end)
+          end,
+        }
+      end,
+    },
+  })
+  assert(vim.wait(1000, function()
+    return panel_text():find("Current generation", 1, true) ~= nil
+  end), "current-generation response did not render")
+  stale_callbacks.actions(nil, {
+    {
+      kind = "action", id = "stale", number = 99, name = "Stale generation",
+      title = "must be ignored", status = "completed", conclusion = "failure",
+    },
+  }, { transport = "stale-fixture" })
+  vim.wait(100, function() return false end, 10)
+  assert(not panel_text():find("Stale generation", 1, true),
+    "a stale GitHub response replaced the current repository data")
+  assert_contains(panel_text(), "Current generation")
+
   panel.select_view(2)
   assert(panel.view == "history", "numeric view selection did not activate history")
   panel.toggle_layout()
