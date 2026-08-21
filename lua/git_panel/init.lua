@@ -3,6 +3,7 @@ local api, fn, uv = vim.api, vim.fn, (vim.uv or vim.loop)
 local github = require('git_panel.github')
 local help_ui = require('git_panel.help')
 local local_model = require('git_panel.model')
+local signed_merge = require('git_panel.signed_merge')
 
 local VIEWS = {
   { id = 'work', label = 'Changes' },
@@ -30,6 +31,7 @@ local DEFAULT_CONFIG = {
     refresh_interval = 60,
     per_page = 30,
     timeout = 15000,
+    merge_backend = 'api',
     gh_command = 'gh',
     curl_command = 'curl',
   },
@@ -1197,6 +1199,10 @@ function M.setup(opts)
   if transport ~= 'auto' and transport ~= 'gh' and transport ~= 'curl' then
     error('git_panel.setup(): github.transport must be "auto", "gh", or "curl"')
   end
+  local merge_backend = M.config.github.merge_backend
+  if merge_backend ~= 'api' and merge_backend ~= 'signed_git' then
+    error('git_panel.setup(): github.merge_backend must be "api" or "signed_git"')
+  end
   M.config.github.per_page = math.max(1, math.min(100,
     tonumber(M.config.github.per_page) or DEFAULT_CONFIG.github.per_page))
   M.config.github.refresh_interval = math.max(0,
@@ -1482,15 +1488,22 @@ local function pull_under_cursor()
   return nil
 end
 
--- Client + repository for write calls; nil (with a notice) when GitHub is
--- not resolvable here, so every action degrades to a no-op message.
-local function github_write_runtime()
+-- Repository metadata for GitHub-backed actions; nil (with a notice) when
+-- GitHub is not resolvable here, so every action degrades to a no-op message.
+local function github_repository_runtime()
   resolve_github_runtime()
-  if github_runtime.client and github_runtime.repository then
-    return github_runtime.client, github_runtime.repository
-  end
+  if github_runtime.repository then return github_runtime.repository end
   vim.notify('GitPanel: GitHub is unavailable for this repository' ..
     (github_runtime.repository_error and ('\n' .. github_runtime.repository_error) or ''),
+    vim.log.levels.WARN)
+  return nil
+end
+
+local function github_write_runtime()
+  local repository = github_repository_runtime()
+  if not repository then return nil end
+  if github_runtime.client then return github_runtime.client, repository end
+  vim.notify('GitPanel: the GitHub API client is unavailable for this repository',
     vim.log.levels.WARN)
   return nil
 end
@@ -1553,45 +1566,119 @@ function M.pr_comment()
   end)
 end
 
+local function cleanup_merged_pull_branch(data, repository, remote_deleted)
+  if not remote_deleted then return end
+  local remote = repository.remote or 'origin'
+  if current_branch() == data.head and data.base then
+    local switched = run({ 'switch', '--', data.base }, { quiet = true })
+    if switched then run({ 'pull', '--ff-only' }, { quiet = true }) end
+  end
+  git({ 'fetch', '--prune', remote }, { allow_fail = true })
+  git({ 'branch', '-d', data.head }, { allow_fail = true })
+end
+
+local function finish_pull_merge(data, repository, remote_deleted, detail)
+  cleanup_merged_pull_branch(data, repository, remote_deleted)
+  vim.notify('GitPanel: merged #' .. tostring(data.number) .. ' into ' ..
+    (data.base or '?') .. (detail and ('\n' .. detail) or ''), vim.log.levels.INFO)
+  M.refresh()
+end
+
+local function merge_pull_via_api(client, repository, data)
+  client:merge_pull(repository, data.number, data.head_sha, function(err)
+    if err then
+      return vim.notify('GitPanel: merge failed\n' .. err.message, vim.log.levels.ERROR)
+    end
+
+    -- Only the base repository's own head branches may be deleted here. A
+    -- cross-fork PR can share a branch name with an unrelated base-repository
+    -- branch, so missing ownership metadata also fails closed.
+    local head_is_local = signed_merge.same_repository(data.head_repository,
+      repository.repository)
+    if not head_is_local then
+      return finish_pull_merge(data, repository, false,
+        'The head branch belongs to another repository and was left untouched.')
+    end
+
+    -- Best-effort branch cleanup: the merge itself already succeeded, so a
+    -- failure here is reported but never treated as a failed merge.
+    client:delete_branch(repository, data.head, function(ref_err)
+      local deleted = not ref_err or ref_err.kind == 'not_found'
+      if not deleted then
+        vim.notify('GitPanel: merged, but the remote branch survived\n' .. ref_err.message,
+          vim.log.levels.WARN)
+      end
+      finish_pull_merge(data, repository, deleted)
+    end)
+  end)
+end
+
+local function merge_pull_via_signed_git(repository, data)
+  if not repository.remote then
+    return vim.notify('GitPanel: signed_git requires a detected GitHub remote; ' ..
+      'github.repository overrides without a matching remote cannot be pushed safely.',
+      vim.log.levels.ERROR)
+  end
+  vim.notify('GitPanel: creating and pushing a signed merge commit…', vim.log.levels.INFO)
+  local result, err = signed_merge.run({
+    root = M.root,
+    remote = repository.remote,
+    repository = repository.repository,
+    number = data.number,
+    title = data.title,
+    base = data.base,
+    head = data.head,
+    head_sha = data.head_sha,
+    head_label = data.head_label,
+    head_repository = data.head_repository,
+  })
+  if not result then
+    return vim.notify('GitPanel: signed merge failed\n' .. err.message, vim.log.levels.ERROR)
+  end
+  if result.branch_delete_error then
+    vim.notify(result.branch_delete_error, vim.log.levels.WARN)
+  end
+  if result.cleanup_error then
+    vim.notify('GitPanel: merge succeeded, but temporary worktree cleanup failed\n' ..
+      result.cleanup_error, vim.log.levels.WARN)
+  end
+  local detail = 'Signed commit ' .. result.merge_sha:sub(1, 12)
+  if not result.head_is_local then
+    detail = detail .. '; cross-repository head branch left untouched.'
+  elseif result.branch_delete_error then
+    detail = detail .. '; remote head branch left intact.'
+  end
+  finish_pull_merge(data, repository, result.remote_branch_deleted, detail)
+end
+
 function M.pr_merge()
   local item = pull_under_cursor()
   if not item then return end
   local data = item.data
-  local client, repository = github_write_runtime()
-  if not client then return end
+  local repository = github_repository_runtime()
+  if not repository then return end
   if data.draft then
     return vim.notify('GitPanel: #' .. tostring(data.number) .. ' is a draft — mark it ready first',
       vim.log.levels.WARN)
   end
+  local backend = M.config.github.merge_backend or 'api'
+  local action = backend == 'signed_git'
+      and 'Create a signed merge commit in a temporary worktree and push it'
+    or 'Merge through the GitHub API'
   local pick = fn.confirm(
     'Merge pull request #' .. tostring(data.number) .. ' "' .. (data.title or '') .. '"\n' ..
-    'into ' .. (data.base or '?') .. '? The branch "' .. (data.head or '?') ..
+    'into ' .. (data.base or '?') .. '?\n\n' .. action ..
+    '. The same-repository head branch "' .. (data.head or '?') ..
     '" is then deleted (remote and local).', '&No\n&Merge', 1)
   if pick ~= 2 then return end
 
-  client:merge_pull(repository, data.number, function(err)
-    if err then
-      return vim.notify('GitPanel: merge failed\n' .. err.message, vim.log.levels.ERROR)
-    end
-    -- Best-effort branch cleanup: the merge itself already succeeded, so a
-    -- failure here is reported but never treated as a failed merge.
-    client:delete_branch(repository, data.head, function(ref_err)
-      if ref_err and ref_err.kind ~= 'not_found' then
-        vim.notify('GitPanel: merged, but the remote branch survived\n' .. ref_err.message,
-          vim.log.levels.WARN)
-      end
-      local remote = repository.remote or 'origin'
-      if current_branch() == data.head and data.base then
-        run({ 'switch', '--', data.base }, { quiet = true })
-        run({ 'pull', '--ff-only' }, { quiet = true })
-      end
-      git({ 'fetch', '--prune', remote }, { allow_fail = true })
-      git({ 'branch', '-d', data.head }, { allow_fail = true })
-      vim.notify('GitPanel: merged #' .. tostring(data.number) .. ' into ' .. (data.base or '?'),
-        vim.log.levels.INFO)
-      M.refresh()
-    end)
-  end)
+  if backend == 'signed_git' then return merge_pull_via_signed_git(repository, data) end
+  local client = github_runtime.client
+  if not client then
+    return vim.notify('GitPanel: the GitHub API client is unavailable for this repository',
+      vim.log.levels.WARN)
+  end
+  merge_pull_via_api(client, repository, data)
 end
 
 function M.primary()
@@ -2334,7 +2421,7 @@ function M.attach_keys()
   k('go', M.pr_checkout, 'check out pull request branch')
   k('gd', M.pr_diff, 'diff pull request against its base')
   k('gc', M.pr_comment, 'comment on pull request')
-  k('gm', M.pr_merge, 'merge pull request (confirm; deletes branch)')
+  k('gm', M.pr_merge, 'merge pull request with configured backend (confirm)')
   k('q', M.close, 'close panel')
   k('g?', M.help, 'help')
   k('?', M.help, 'help')

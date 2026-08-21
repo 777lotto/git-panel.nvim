@@ -51,7 +51,9 @@ local github_fixtures = {
   pulls = {
     {
       kind = "pull", id = "301", number = 8, title = "Add repository views", state = "open",
-      draft = true, author = "octo", head = "feature", base = "bluff", labels = {}, comments = 0,
+      draft = true, author = "octo", head = "feature", head_sha = string.rep("a", 40),
+      head_label = "octo:feature", head_repository = "octo/git-panel", base = "bluff",
+      base_repository = "octo/git-panel", labels = {}, comments = 0,
       body = "Actions, Issues, and Pull Requests.", updated_at = "2026-08-16T12:00:00Z",
       url = "https://github.com/octo/git-panel/pull/8",
     },

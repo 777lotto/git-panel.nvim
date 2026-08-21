@@ -16,6 +16,9 @@ Notable changes are recorded here. Releases follow semantic versioning.
 - GitHub.com, GHE.com, and configured GitHub Enterprise remote discovery.
 - `setup()` options for GitHub transport, repository overrides, cache timing,
   and synchronous or asynchronous short-lived token providers.
+- An opt-in `signed_git` pull-request merge backend that verifies the exact PR
+  head, creates a locally signed merge in a temporary worktree, and pushes with
+  non-force and lease-protected Git operations.
 - Focused provider, response-normalization, redaction, and help-renderer tests.
 
 ### Changed
@@ -27,12 +30,17 @@ Notable changes are recorded here. Releases follow semantic versioning.
 - Repository links now distinguish actionable Issues from community Discussions
   and connect cross-repository work to Neovim Workspace.
 - GitHub Actions use `actions/checkout` v7.
+- The `gh` transport now follows the endpoint-first `gh api` contract and sets
+  `GH_HOST`, allowing API-only GitHub App wrappers without changing the default
+  experience for regular `gh` users.
 
 ### Security
 
 - GitHub credentials are never persisted, rendered, notified, or placed in
   process arguments. Raw GitHub App private keys remain outside Neovim; curl
   authorization headers travel over standard input.
+- Pull-request branch cleanup is restricted to same-repository heads. Signed
+  Git cleanup uses an exact-SHA force-with-lease and never targets fork heads.
 
 ## 0.1.0 - 2026-08-15
 
