@@ -284,7 +284,14 @@ function M.normalize_pulls(payload)
       draft = strip_nil(pull.draft) == true,
       author = type(pull.user) == 'table' and strip_nil(pull.user.login) or nil,
       head = type(pull.head) == 'table' and strip_nil(pull.head.ref) or nil,
+      head_sha = type(pull.head) == 'table' and strip_nil(pull.head.sha) or nil,
+      head_label = type(pull.head) == 'table' and strip_nil(pull.head.label) or nil,
+      head_repository = type(pull.head) == 'table' and type(pull.head.repo) == 'table'
+        and strip_nil(pull.head.repo.full_name) or nil,
       base = type(pull.base) == 'table' and strip_nil(pull.base.ref) or nil,
+      base_sha = type(pull.base) == 'table' and strip_nil(pull.base.sha) or nil,
+      base_repository = type(pull.base) == 'table' and type(pull.base.repo) == 'table'
+        and strip_nil(pull.base.repo.full_name) or nil,
       labels = labels_from(pull.labels),
       comments = (pull.comments or 0) + (pull.review_comments or 0),
       created_at = strip_nil(pull.created_at),
@@ -415,7 +422,7 @@ function Client:_request_gh(repository, spec, token, callback)
     return callback({ kind = 'configuration', message = version_error })
   end
   local command = {
-    self.opts.gh_command or 'gh', 'api', '--hostname', repository.host,
+    self.opts.gh_command or 'gh', 'api', spec.endpoint,
     '--header', 'Accept: application/vnd.github+json',
     '--header', 'X-GitHub-Api-Version: ' .. version,
   }
@@ -429,8 +436,7 @@ function Client:_request_gh(repository, spec, token, callback)
     command[#command + 1] = '-'
     stdin = vim.json.encode(spec.body)
   end
-  command[#command + 1] = spec.endpoint
-  local env = {}
+  local env = { GH_HOST = repository.host }
   if token then
     if is_cloud_host(repository.host) then env.GH_TOKEN = token
     else env.GH_ENTERPRISE_TOKEN = token end
@@ -588,15 +594,38 @@ local function valid_pull_number(number)
   return type(number) == 'number' and number > 0 and number == math.floor(number)
 end
 
-function Client:merge_pull(repository, number, callback)
+local function valid_git_sha(value)
+  return type(value) == 'string' and (#value == 40 or #value == 64)
+    and value:match('^[%da-fA-F]+$') ~= nil
+end
+
+function Client:merge_pull(repository, number, head_sha, callback)
+  if type(head_sha) == 'function' then
+    callback, head_sha = head_sha, nil
+  end
   if not valid_pull_number(number) then
     return callback({ kind = 'configuration', message = 'merge_pull needs a pull request number' })
   end
+  if head_sha ~= nil and not valid_git_sha(head_sha) then
+    return callback({ kind = 'configuration', message = 'merge_pull refuses an invalid head SHA' })
+  end
+  local body = { merge_method = 'merge' }
+  if head_sha then body.sha = head_sha end
   self:mutate({
     method = 'PUT',
     endpoint = 'repos/' .. repository.repository .. '/pulls/' .. number .. '/merge',
-    body = { merge_method = 'merge' },
-  }, repository, callback)
+    body = body,
+  }, repository, function(err, payload)
+    if err then return callback(err) end
+    if type(payload) ~= 'table' or payload.merged ~= true then
+      local detail = type(payload) == 'table' and trim(payload.message) or ''
+      return callback({
+        kind = 'merge',
+        message = detail ~= '' and detail or 'GitHub did not confirm that the pull request merged.',
+      })
+    end
+    callback(nil, payload)
+  end)
 end
 
 function Client:comment_pull(repository, number, body, callback)

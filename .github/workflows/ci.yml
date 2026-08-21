@@ -85,6 +85,9 @@ jobs:
       - name: Run isolated Git fixture smoke test
         run: nvim --headless -u tests/minimal_init.lua -l tests/smoke.lua
 
+      - name: Run signed merge Git fixture
+        run: nvim --headless -u tests/minimal_init.lua -l tests/signed_merge.lua
+
       - name: Verify help tags
         if: matrix.neovim == 'v0.12.4'
         run: |
@@ -135,3 +138,6 @@ jobs:
 
       - name: Run isolated Git fixture smoke test
         run: nvim --headless -u tests/minimal_init.lua -l tests/smoke.lua
+
+      - name: Run signed merge Git fixture
+        run: nvim --headless -u tests/minimal_init.lua -l tests/signed_merge.lua
