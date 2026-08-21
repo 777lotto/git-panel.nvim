@@ -6,6 +6,10 @@ Notable changes are recorded here. Releases follow semantic versioning.
 
 ### Added
 
+- Responsive repository overview data, concurrent Git snapshots, contextual
+  wide-layout details, and informative compact/empty states.
+- A production-branch hook that can request a focused GitPanel lock refresh in
+  `nvim-config` without floating user installs away from tested commits.
 - Read-only Actions, Issues, and Pull Requests views with asynchronous `gh` and
   curl transports, per-repository caches, explicit loading/error states, and
   in-editor or browser details.
