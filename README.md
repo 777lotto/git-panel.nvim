@@ -13,6 +13,10 @@ lets you review, comment on, and merge pull requests without leaving it.
 ## Highlights
 
 - Five first-class views: Changes, History, Actions, Issues, and Pull Requests.
+- Non-blocking local snapshots: independent Git reads run concurrently and
+  stale callbacks cannot replace a newer repository state.
+- A responsive full-tab workspace with a live diff/object context rail on wide
+  screens; the compact split keeps the focused navigation layout.
 - Branch and worktree creation, switching, renaming, merging, and removal.
 - Staging, discarding, signing-aware commits, and explicit conflict actions.
 - Pull, fetch, push, and first-push repository publication.
@@ -86,7 +90,7 @@ point is `require("git_panel").open("tab")` or `.open("split")`.
 | `W` | Create a worktree |
 | `F` / `P` / `f` | Pull / push-or-publish / fetch |
 | `L` | Toggle tab and split layouts |
-| `r` | Refresh locally or synchronize the active GitHub view |
+| `r` | Refresh local state and synchronize GitHub repository context |
 | `gx` | Open the selected GitHub item in a browser |
 | `go` / `gd` | Check out / diff the selected pull request against its base |
 | `gc` / `gm` | Comment on / merge the selected pull request (confirm; deletes its branch) |
@@ -95,6 +99,13 @@ point is `require("git_panel").open("tab")` or `.open("split")`.
 
 Conflict workflows expose take-ours/take-theirs, continue, and abort actions;
 remote branch renames use leases and avoid overwriting an unrelated ref.
+
+The full-tab layout adapts at 120 columns. At wider sizes, the dashboard uses
+the left side for repository state and the right side for context: repository
+and remote metadata by default, then a live diff, commit stat, branch tip,
+worktree status, tag, stash, push, issue, workflow, or pull-request summary as
+the cursor moves. Below that threshold it collapses to one pane. The split
+layout remains a fixed-width, compact control surface.
 
 When `P` is pressed in a repository with no configured remote, GitPanel offers
 two paths:
@@ -113,7 +124,10 @@ upstream tracking.
 The Actions and Issues views are read-only; the Pull Requests view adds
 review-and-land actions that always confirm before writing. GitPanel resolves
 the current repository from a GitHub.com or `*.ghe.com` remote, preferring
-`origin`, then caches each view independently. Opening a view renders cached
+`origin`, then caches repository metadata and each view independently. Open
+issue/PR counts and the latest workflow state appear in the view bar. The
+context rail adds visibility, default branch, and description without adding
+vanity metrics. Opening a view renders cached
 content immediately and starts a background refresh when the cache is stale.
 Loading, empty, authentication, permission, rate-limit, network, and stale-data
 states are shown inside the panel.
@@ -249,6 +263,7 @@ spans this plugin and `nvim-config` is planned in the public
 git-panel.nvim/
 ├── .github/                 # CI, issue forms, and contribution templates
 ├── lua/git_panel/init.lua   # dashboard, actions, rendering, and public Lua API
+├── lua/git_panel/model.lua  # concurrent local Git snapshot and parsers
 ├── lua/git_panel/github.lua # GitHub discovery, transports, and response models
 ├── lua/git_panel/help.lua   # structured responsive key-guide renderer
 ├── plugin/git-panel.lua     # lightweight command registration

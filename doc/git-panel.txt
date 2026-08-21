@@ -48,7 +48,7 @@ Calling setup() is optional. See |git-panel-github| for configuration.
 
 The view bar contains:
 
-1 Changes       Staged, unstaged, untracked, unpushed, and pushed work.
+1 Changes       Working-tree state, outgoing commits, branches, and worktrees.
 2 History       Uncommitted files and recent commits.
 3 Actions       Recent GitHub Actions workflow runs.
 4 Issues        Open GitHub issues (pull requests are excluded).
@@ -78,13 +78,26 @@ F / P / f      Pull with --ff-only, push/publish, or fetch and prune.
                an existing remote URL as origin, then push with tracking.
 gx             Open the selected GitHub item in the system browser.
 L              Toggle full-tab and left-split layouts.
-r              Refresh locally, or force a GitHub synchronization.
+r              Refresh local state and force a GitHub synchronization.
 ? / g?         Open the structured, highlighted, scrollable key guide.
 q              Close the panel. In a detail or key-guide window, close it.
 
 Conflict workflows show the rebase-specific meaning of ours/theirs in the
 operation banner. Remote branch renames use leases and avoid overwriting an
 unrelated ref.
+
+LOCAL SNAPSHOT AND RESPONSIVE LAYOUT                  *git-panel-responsive*
+
+Independent local Git reads run concurrently; opening or changing a view does
+not wait on a serial command chain. A generation guard prevents an older
+snapshot from replacing newer state.
+
+The full-tab layout adds a context rail at 120 columns or wider. It begins with
+the repository root, upstream/sync state, remotes, GitHub metadata, and object
+counts. Moving the cursor previews file diffs, commit stats, branch tips,
+worktree status, tags, stashes, pushes, and GitHub items. Narrower tab pages
+collapse to one pane. :GitPanelSplit always remains a compact fixed-width
+control surface.
 
 ==============================================================================
 5. GITHUB INTEGRATION                                         *git-panel-github*
@@ -97,6 +110,11 @@ stale, authentication, permission, rate-limit, network, and transport states.
 GitPanel detects GitHub.com and *.ghe.com SSH/HTTPS remotes, preferring origin.
 Set github.host to identify a custom GitHub Enterprise Server host, or set
 github.repository to OWNER/REPO when remote discovery is unsuitable.
+
+Repository metadata is fetched with the other cached views. The tab bar shows
+open issue and pull-request counts plus the latest workflow state; the context
+rail shows visibility, default branch, and description. Vanity metrics are not
+shown.
 
 Default configuration: >lua
 

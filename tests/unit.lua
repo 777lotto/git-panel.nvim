@@ -1,5 +1,6 @@
 local github = require("git_panel.github")
 local help = require("git_panel.help")
+local local_model = require("git_panel.model")
 
 local function equal(actual, expected, message)
   assert(actual == expected, (message or "values differ") ..
@@ -41,6 +42,21 @@ local function test_remote_parsing()
 end
 
 local function test_normalization()
+  local overview = github.normalize_overview({
+    id = 1,
+    name = "widgets",
+    full_name = "octo/widgets",
+    description = "Useful widgets",
+    visibility = "private",
+    private = true,
+    default_branch = "bet",
+    owner = { login = "octo" },
+    html_url = "https://github.com/octo/widgets",
+  })
+  equal(#overview, 1)
+  equal(overview[1].default_branch, "bet")
+  equal(overview[1].visibility, "private")
+
   local actions = github.normalize_actions({
     workflow_runs = {
       {
@@ -235,6 +251,27 @@ local function test_help_rendering()
   vim.api.nvim_win_close(win, true)
 end
 
+local function test_concurrent_local_snapshot()
+  local callbacks, completed = {}, nil
+  local_model.gather("/tmp/example", {
+    system = function(command, opts, callback)
+      callbacks[#callbacks + 1] = { command = command, opts = opts, callback = callback }
+      return {}
+    end,
+  }, function(value) completed = value end)
+
+  equal(#callbacks, 10, "local snapshot did not launch every independent read")
+  assert(completed == nil, "local snapshot completed before command callbacks")
+  for _, request in ipairs(callbacks) do
+    equal(request.command[1], "git")
+    equal(request.opts.cwd, "/tmp/example")
+    request.callback({ code = 1, stdout = "", stderr = "fixture unavailable" })
+  end
+  assert(vim.wait(1000, function() return completed ~= nil end),
+    "local snapshot did not join concurrent command callbacks")
+  equal(#completed.errors, 1, "only the required status failure should surface")
+end
+
 local function test_pull_request_mutations()
   local repository = {
     host = "github.com",
@@ -329,5 +366,6 @@ test_normalization()
 test_transports_and_redaction()
 test_pull_request_mutations()
 test_help_rendering()
+test_concurrent_local_snapshot()
 
 print("GitPanel unit tests passed")
