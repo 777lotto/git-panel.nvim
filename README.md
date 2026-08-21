@@ -247,6 +247,13 @@ not split into operating-system branches or GitHub Environments.
 - Focused branches merge into `bluff`; releases promote `bluff` into `bet`.
 - Signed `vX.Y.Z` tags identify releases.
 
+Each push to production `bet` can request a focused `git-panel.nvim` lockfile
+refresh in `777lotto/nvim-config`. Configure the plugin repository secret
+`NVIM_CONFIG_DISPATCH_TOKEN` with a fine-grained token scoped only to
+`777lotto/nvim-config` and its Contents permission set to write. If the secret
+is absent, the notification workflow exits successfully with a setup notice;
+it never broadens repository or network access.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and pull-request guidance.
 
 ## Community and roadmap
