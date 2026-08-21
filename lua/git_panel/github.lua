@@ -296,7 +296,29 @@ function M.normalize_pulls(payload)
   return items
 end
 
+function M.normalize_overview(payload)
+  if type(payload) ~= 'table' then return {} end
+  local owner = type(payload.owner) == 'table' and strip_nil(payload.owner.login) or nil
+  return { {
+    kind = 'overview',
+    id = tostring(payload.id or ''),
+    name = strip_nil(payload.name),
+    full_name = strip_nil(payload.full_name),
+    description = strip_nil(payload.description),
+    visibility = strip_nil(payload.visibility) or (payload.private and 'private' or 'public'),
+    private = payload.private == true,
+    archived = payload.archived == true,
+    fork = payload.fork == true,
+    default_branch = strip_nil(payload.default_branch),
+    language = strip_nil(payload.language),
+    owner = owner,
+    url = strip_nil(payload.html_url),
+    updated_at = strip_nil(payload.updated_at),
+  } }
+end
+
 local NORMALIZERS = {
+  overview = M.normalize_overview,
   actions = M.normalize_actions,
   issues = M.normalize_issues,
   pulls = M.normalize_pulls,
@@ -304,7 +326,9 @@ local NORMALIZERS = {
 
 local function endpoint_for(view, repository, per_page)
   local prefix = 'repos/' .. repository.repository
-  if view == 'actions' then
+  if view == 'overview' then
+    return prefix
+  elseif view == 'actions' then
     return prefix .. '/actions/runs?per_page=' .. per_page
   elseif view == 'issues' then
     return prefix .. '/issues?state=open&sort=updated&direction=desc&per_page=' .. per_page

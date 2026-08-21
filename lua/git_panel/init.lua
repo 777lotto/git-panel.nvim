@@ -2,6 +2,7 @@
 local api, fn, uv = vim.api, vim.fn, (vim.uv or vim.loop)
 local github = require('git_panel.github')
 local help_ui = require('git_panel.help')
+local local_model = require('git_panel.model')
 
 local VIEWS = {
   { id = 'work', label = 'Changes' },
@@ -42,11 +43,20 @@ local M = {
   folds = { pushed = true },  -- section_id -> collapsed; Pushed starts folded (long history)
   root = nil,        -- repo root for the active panel
   line_map = {},     -- 1-indexed line number -> item descriptor
+  model = nil,       -- last completed asynchronous local snapshot
+  detail_buf = nil,  -- contextual preview rail (wide tab layout only)
+  detail_win = nil,
+  tab = nil,
+  model_generation = 0,
+  detail_generation = 0,
+  cursor_generation = 0,
   prev_win = nil,    -- window we came from (for opening files)
   start_dir = nil,   -- dir used to locate the repo
   config = vim.deepcopy(DEFAULT_CONFIG),
 }
 local PANEL_WIDTH = 48
+local WIDE_MIN_COLUMNS = 120
+local DETAIL_MIN_WIDTH = 38
 local ns = api.nvim_create_namespace('gitpanel')
 local home = uv.os_homedir() or ''
 local github_runtime = {
@@ -83,13 +93,6 @@ end
 local function trim(s)
   return (s or ''):match('^%s*(.-)%s*$')
 end
--- split on NUL, returning every field including trailing empties dropped
-local function nul_split(s)
-  local t = {}
-  for field in (s or ''):gmatch('([^%z]*)%z') do t[#t + 1] = field end
-  return t
-end
-
 local function is_github_view(view)
   local index = VIEW_INDEX[view]
   return index and VIEWS[index].github == true or false
@@ -149,6 +152,35 @@ local function github_snapshot(view)
   }
 end
 
+
+local function github_dashboard_snapshot()
+  local snapshots = {}
+  for _, view in ipairs({ 'overview', 'actions', 'issues', 'pulls' }) do
+    snapshots[view] = github_snapshot(view)
+  end
+  return snapshots
+end
+
+local function github_summary(snapshots)
+  snapshots = snapshots or {}
+  local summary = {}
+  for _, view in ipairs({ 'issues', 'pulls' }) do
+    local snapshot = snapshots[view]
+    if snapshot and snapshot.status == 'ready' then
+      summary[view] = { count = #(snapshot.items or {}) }
+    end
+  end
+  local actions = snapshots.actions
+  if actions and actions.status == 'ready' then
+    local run = (actions.items or {})[1]
+    local value = run and (run.conclusion or run.status)
+    local glyph = ({ success = '✓', failure = '✗', cancelled = '○',
+      in_progress = '●', queued = '◌' })[value] or (#(actions.items or {}) > 0 and '·' or '0')
+    summary.actions = { state = glyph, count = #(actions.items or {}) }
+  end
+  return summary
+end
+
 local function remote_names()
   local res = git({ 'remote' }, { allow_fail = true })
   local names = {}
@@ -176,239 +208,6 @@ local function op_state()
 end
 
 -- ---------------------------------------------------------------------------
--- Data gathering -> a plain model table.
--- ---------------------------------------------------------------------------
-local function realpath(p) return (p and uv.fs_realpath(p)) or p end
-local function same_path(a, b)
-  a, b = realpath(a), realpath(b)
-  if not a or not b then return false end
-  if uv.os_uname().sysname == 'Darwin' then
-    return a:lower() == b:lower() -- default macOS APFS is case-insensitive
-  end
-  return a == b -- Linux filesystems are normally case-sensitive
-end
-
-local function gather()
-  local m = { branches = {}, worktrees = {}, staged = {}, unstaged = {},
-              untracked = {}, conflicts = {}, commits = {}, unpushed = {},
-              pushes = {}, remotes = {}, head = {} }
-
-  m.remotes = remote_names()
-  m.has_remotes = #m.remotes > 0
-
-  -- HEAD classification (branch / detached / unborn)
-  local sym = git({ 'symbolic-ref', '--quiet', '--short', 'HEAD' }, { allow_fail = true })
-  local has_head = git({ 'rev-parse', '--verify', '--quiet', 'HEAD' }, { allow_fail = true })
-  if sym.code == 0 and has_head.code == 0 then
-    m.head.branch = chomp(sym.stdout)
-  elseif sym.code == 0 and has_head.code ~= 0 then
-    m.head.branch, m.head.unborn = chomp(sym.stdout), true
-  else -- detached
-    m.head.detached = true
-    m.head.sha = chomp(git({ 'rev-parse', '--short', 'HEAD' }, { allow_fail = true }).stdout)
-  end
-
-  -- upstream + ahead/behind for current branch
-  if not m.head.unborn then
-    local up = git({ 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}' },
-      { allow_fail = true })
-    if up.code == 0 then
-      m.head.upstream = chomp(up.stdout)
-      local ab = git({ 'rev-list', '--left-right', '--count', '@{upstream}...HEAD' },
-        { allow_fail = true })
-      if ab.code == 0 then
-        local behind, ahead = chomp(ab.stdout):match('(%d+)%s+(%d+)')
-        m.head.behind, m.head.ahead = tonumber(behind) or 0, tonumber(ahead) or 0
-      end
-    end
-  end
-
-  -- local branches
-  local fmt = '%(HEAD)%00%(refname:short)%00%(objectname:short)%00' ..
-              '%(upstream:short)%00%(upstream:remotename)%00%(upstream:remoteref)%00' ..
-              '%(upstream:trackshort)%00%(worktreepath)%00%(contents:subject)'
-  local br = git({ 'for-each-ref', '--sort=-committerdate', '--format=' .. fmt, 'refs/heads' },
-    { allow_fail = true })
-  if br.code == 0 then
-    for line in chomp(br.stdout):gmatch('[^\n]+') do
-      local f = {}
-      for x in (line .. '\0'):gmatch('([^%z]*)%z') do f[#f + 1] = x end
-      if f[2] and f[2] ~= '' then
-        m.branches[#m.branches + 1] = {
-          current = (f[1] == '*'), name = f[2], sha = f[3],
-          upstream = (f[4] ~= '' and f[4]) or nil,
-          remote = (f[5] ~= '' and f[5]) or nil,
-          remote_ref = (f[6] ~= '' and f[6]) or nil,
-          track = f[7] or '',
-          worktree = (f[8] ~= '' and f[8]) or nil,  -- folder holding this branch
-          subject = f[9] or '',
-        }
-      end
-    end
-    -- show the current branch first (rest stay in committerdate order)
-    for idx, b in ipairs(m.branches) do
-      if b.current then table.remove(m.branches, idx); table.insert(m.branches, 1, b); break end
-    end
-  end
-
-  -- worktrees (porcelain -z: NUL-terminated attrs, empty field = record break)
-  local wt = git({ 'worktree', 'list', '--porcelain', '-z' }, { allow_fail = true })
-  if wt.code == 0 then
-    local cur = {}
-    local function flush()
-      if cur.path then
-        local label = '(bare)'
-        if cur.branch then label = cur.branch:gsub('^refs/heads/', '')
-        elseif cur.detached and cur.HEAD then label = cur.HEAD:sub(1, 7) .. ' (detached)' end
-        m.worktrees[#m.worktrees + 1] = {
-          path = cur.path, label = label,
-          current = same_path(cur.path, M.root),
-          flags = { locked = cur.locked, prunable = cur.prunable, bare = cur.bare },
-        }
-      end
-      cur = {}
-    end
-    for _, tok in ipairs(nul_split(wt.stdout)) do
-      if tok == '' then
-        flush()
-      else
-        local key, val = tok:match('^(%S+)%s?(.*)$')
-        if key == 'worktree' then cur.path = val
-        elseif key == 'HEAD' then cur.HEAD = val
-        elseif key == 'branch' then cur.branch = val
-        elseif key == 'bare' then cur.bare = true
-        elseif key == 'detached' then cur.detached = true
-        elseif key == 'locked' then cur.locked = true
-        elseif key == 'prunable' then cur.prunable = true end
-      end
-    end
-    flush()
-  end
-
-  -- working-tree status (porcelain v2 -z)
-  local st = git({ 'status', '--porcelain=v2', '-z', '--untracked-files=all', '--ignored=no' },
-    { allow_fail = true })
-  if st.code == 0 then
-    local toks = nul_split(st.stdout)
-    local i = 1
-    while i <= #toks do
-      local tok = toks[i]
-      local kind = tok:sub(1, 1)
-      if kind == '1' then
-        local xy = tok:sub(3, 4)
-        local path = tok:match('^%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+(.+)$')
-        local rec = { x = xy:sub(1, 1), y = xy:sub(2, 2), path = path }
-        if rec.x ~= '.' then m.staged[#m.staged + 1] = rec end
-        if rec.y ~= '.' then m.unstaged[#m.unstaged + 1] = rec end
-        i = i + 1
-      elseif kind == '2' then
-        local xy = tok:sub(3, 4)
-        local path = tok:match('^%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+(.+)$')
-        local orig = toks[i + 1]  -- rename/copy consumes an extra NUL field
-        local rec = { x = xy:sub(1, 1), y = xy:sub(2, 2), path = path, orig = orig }
-        if rec.x ~= '.' then m.staged[#m.staged + 1] = rec end
-        if rec.y ~= '.' then m.unstaged[#m.unstaged + 1] = rec end
-        i = i + 2
-      elseif kind == 'u' then
-        local xy = tok:sub(3, 4)
-        local path = tok:match('^u%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+%S+%s+(.+)$')
-        m.conflicts[#m.conflicts + 1] = { x = xy:sub(1, 1), y = xy:sub(2, 2), path = path }
-        i = i + 1
-      elseif kind == '?' then
-        m.untracked[#m.untracked + 1] = { path = tok:sub(3) }
-        i = i + 1
-      else
-        i = i + 1
-      end
-    end
-  end
-
-  -- combined "uncommitted" list (dedup by display path) for the history view
-  local seen, uncommitted = {}, {}
-  local function add_unc(rec, badge)
-    local key = rec.path
-    if seen[key] then return end
-    seen[key] = true
-    uncommitted[#uncommitted + 1] = { x = rec.x, y = rec.y, path = rec.path, orig = rec.orig, badge = badge }
-  end
-  for _, r in ipairs(m.conflicts) do add_unc(r, 'conflict') end
-  for _, r in ipairs(m.staged) do add_unc(r) end
-  for _, r in ipairs(m.unstaged) do add_unc(r) end
-  for _, r in ipairs(m.untracked) do add_unc({ x = '?', y = '?', path = r.path }, 'untracked') end
-  m.uncommitted = uncommitted
-
-  -- recent commits (skip when unborn — git log would fail)
-  if not m.head.unborn then
-    -- %G? = signature status per commit (G/U good, N none, E can't check, …).
-    -- Costs one gpg verification per *signed* commit; unsigned rows are free.
-    local lg = git({ 'log', '-n', '30', '--format=%h%x00%G?%x00%s%x00%D', '-z',
-      '--decorate=short', 'HEAD' }, { allow_fail = true })
-    if lg.code == 0 then
-      local toks = nul_split(lg.stdout)
-      for j = 1, #toks - 3, 4 do
-        m.commits[#m.commits + 1] = { sha = toks[j], sig = toks[j + 1],
-          subject = toks[j + 2], refs = toks[j + 3] }
-      end
-    end
-  end
-
-  -- committed-but-not-pushed: reachable from HEAD, not from ANY remote ref.
-  -- Correct without an upstream (still catches local-only commits) and when
-  -- the branch was pushed to a different remote. Gated on there being at
-  -- least one configured remote. When a remote has no tracking refs yet,
-  -- "--not --remotes" intentionally lists the whole local history: none of it
-  -- has been observed on a remote, which is the useful result after attaching
-  -- a new/empty remote or after an initial push fails.
-  -- Fetches 51 to detect (and flag) the >50 overflow case.
-  if not m.head.unborn then
-    if m.has_remotes then
-      local un = git({ 'log', 'HEAD', '--not', '--remotes', '-z',
-        '--format=%h%x00%G?%x00%s%x00%D', '-n', '51' }, { allow_fail = true })
-      if un.code == 0 then
-        local toks = nul_split(un.stdout)
-        for j = 1, #toks - 3, 4 do
-          m.unpushed[#m.unpushed + 1] = { sha = toks[j], sig = toks[j + 1],
-            subject = toks[j + 2], refs = toks[j + 3] }
-        end
-      end
-    end
-  end
-
-  -- push history: the reflog of the upstream tracking ref. The reflog is a
-  -- contiguous journal, so entry i's *previous* ref state is entry i+1's
-  -- commit — the commits that entry introduced are therefore old..new. We
-  -- record old before filtering to push entries so ranges stay correct even
-  -- when a fetch/pull sits between two pushes. We show the reflog date (%gd,
-  -- when the push happened) and the tip commit's subject (%s) — NOT %cs (the
-  -- commit's own date) nor %gs (which is just "update by push" for every row,
-  -- and is used only to identify pushes).
-  if m.head.upstream then
-    local rl = git({ 'log', '-g', '-z', '--date=short',
-      '--format=%H%x00%h%x00%gd%x00%gs%x00%s', '-n', '80', m.head.upstream },
-      { allow_fail = true })
-    if rl.code == 0 then
-      local toks = nul_split(rl.stdout)
-      local entries = {}
-      for j = 1, #toks - 4, 5 do
-        entries[#entries + 1] = { new = toks[j], short = toks[j + 1],
-                                  date = (toks[j + 2]:match('@{(.-)}$') or ''),
-                                  reflog = toks[j + 3], subject = toks[j + 4] }
-      end
-      for idx, e in ipairs(entries) do
-        e.old = entries[idx + 1] and entries[idx + 1].new or nil
-        if (e.reflog or ''):lower():find('push', 1, true) then
-          m.pushes[#m.pushes + 1] = e
-        end
-      end
-    end
-  end
-
-  m.op = op_state()   -- in-progress merge/rebase/cherry-pick/revert (or nil)
-
-  return m
-end
-
--- ---------------------------------------------------------------------------
 -- Rendering: model -> (lines, line_map, highlights)
 -- ---------------------------------------------------------------------------
 local function tilde(p)
@@ -422,8 +221,22 @@ local function status_letter(rec)
   return c
 end
 
+local function relative_time(timestamp)
+  timestamp = tonumber(timestamp)
+  if not timestamp then return '' end
+  local seconds = math.max(0, os.time() - timestamp)
+  if seconds < 60 then return 'now' end
+  if seconds < 3600 then return math.floor(seconds / 60) .. 'm ago' end
+  if seconds < 86400 then return math.floor(seconds / 3600) .. 'h ago' end
+  if seconds < 86400 * 30 then return math.floor(seconds / 86400) .. 'd ago' end
+  if seconds < 86400 * 365 then return math.floor(seconds / (86400 * 30)) .. 'mo ago' end
+  return math.floor(seconds / (86400 * 365)) .. 'y ago'
+end
+
 local function render(m)
   local lines, map, hls = {}, {}, {}
+  local panel_width = (M.win and api.nvim_win_is_valid(M.win))
+      and api.nvim_win_get_width(M.win) or PANEL_WIDTH
   local function emit(text, item, hl)
     lines[#lines + 1] = text
     local lnum = #lines
@@ -436,30 +249,71 @@ local function render(m)
   end
   local function folded(id) return M.folds[id] == true end
   local function chevron(id) return folded(id) and '▸' or '▾' end
-
-  -- ---- header -----------------------------------------------------------
-  local name = fn.fnamemodify(M.root or '', ':t')
-  local hl
-  if m.head.unborn then
-    hl = (m.head.branch or 'HEAD') .. '  (no commits yet)'
-  elseif m.head.detached then
-    hl = 'detached @ ' .. (m.head.sha or '?')
-  else
-    hl = m.head.branch or '?'
-    local extra = {}
-    if m.head.ahead and m.head.ahead > 0 then extra[#extra + 1] = '↑' .. m.head.ahead end
-    if m.head.behind and m.head.behind > 0 then extra[#extra + 1] = '↓' .. m.head.behind end
-    if m.head.upstream and #extra == 0 then extra[#extra + 1] = '✓' end
-    if #extra > 0 then hl = hl .. '  ' .. table.concat(extra, ' ') end
+  local function row_limit() return math.max(24, panel_width - 3) end
+  local function shorten(text, limit)
+    text = tostring(text or '')
+    if fn.strdisplaywidth(text) <= limit then return text end
+    local chars = fn.strchars(text)
+    while chars > 1 do
+      local candidate = fn.strcharpart(text, 0, chars - 1) .. '…'
+      if fn.strdisplaywidth(candidate) <= limit then return candidate end
+      chars = chars - 1
+    end
+    return '…'
   end
-  local hline = emit('  ' .. name .. '  on  ' .. hl, { kind = 'head' }, 'GitPanelHeader')
+  local function one_line(text)
+    return trim(tostring(text or ''):gsub('%c', ' '):gsub('%s+', ' '))
+  end
+
+  -- ---- repository identity and working-state summary -------------------
+  local name = fn.fnamemodify(M.root or '', ':t')
+  local hline = emit('  ' .. name, { kind = 'head' }, 'GitPanelHeader')
   span(hline, 2, 2 + #name, 'GitPanelTitle')
+  if M.mode == 'tab' then emit('  ' .. tilde(M.root or ''), nil, 'GitPanelHint') end
+
+  local branch
+  if m.head.unborn then
+    branch = (m.head.branch or 'HEAD') .. ' · no commits yet'
+  elseif m.head.detached then
+    branch = 'detached @ ' .. (m.head.sha or '?')
+  else
+    branch = m.head.branch or '?'
+    if m.head.upstream then branch = branch .. '  →  ' .. m.head.upstream end
+  end
+  local sync = {}
+  if (m.head.ahead or 0) > 0 then sync[#sync + 1] = '↑' .. m.head.ahead .. ' ahead' end
+  if (m.head.behind or 0) > 0 then sync[#sync + 1] = '↓' .. m.head.behind .. ' behind' end
+  if m.synced then sync[#sync + 1] = '✓ synced' end
+  if not m.head.upstream and not m.head.unborn then sync[#sync + 1] = 'no upstream' end
+  emit(shorten('  ' .. branch .. (#sync > 0 and ('  ·  ' .. table.concat(sync, '  ')) or ''), row_limit()),
+    { kind = 'head' }, 'GitPanelHeader')
+
+  local change_count = #m.staged + #m.unstaged + #m.untracked + #m.conflicts
+  local state = m.working_clean and '✓ clean' or ('● ' .. change_count .. ' change' ..
+    (change_count == 1 and '' or 's'))
+  local chips = { state, tostring(m.commit_count or 0) .. ' commits',
+    tostring(#m.branches) .. ' branches', tostring(#m.worktrees) .. ' worktrees' }
+  emit('  ' .. table.concat(chips, '  ·  '), nil,
+    m.working_clean and 'GitPanelStaged' or 'GitPanelUnstaged')
+  if m.latest then
+    emit(shorten('  Latest  ' .. m.latest.sha .. '  ' .. m.latest.subject ..
+      (m.latest.author and ('  ·  ' .. m.latest.author) or '') ..
+      (m.latest.timestamp and ('  ·  ' .. relative_time(m.latest.timestamp)) or ''), row_limit()),
+      { kind = 'commit', value = m.latest.sha, section = 'latest', data = m.latest }, 'GitPanelHint')
+  end
+  emit('')
 
   local function tab_line(first, last)
     local text, tabs = '  ', {}
     for index = first, last do
       local view = VIEWS[index]
-      local label = (view.id == M.view and '▸ ' or '  ') .. index .. ' ' .. view.label
+      local summary = m.github_summary and m.github_summary[view.id]
+      local badge = ''
+      if summary then
+        if view.id == 'actions' and summary.state then badge = ' ' .. summary.state
+        elseif summary.count ~= nil then badge = ' ' .. summary.count end
+      end
+      local label = (view.id == M.view and '▸ ' or '  ') .. index .. ' ' .. view.label .. badge
       if index > first then text = text .. '   ' end
       local start_col = #text
       text = text .. label
@@ -476,14 +330,6 @@ local function render(m)
     tab_line(4, 5)
   else
     tab_line(1, #VIEWS)
-  end
-  if is_github_view(M.view) then
-    emit('  <CR> details · gx browser · r sync · g? help · q quit', nil, 'GitPanelHint')
-  elseif M.mode == 'split' then
-    emit('  Tab cycle · 1–5 jump · g? help · q quit', nil, 'GitPanelHint')
-  else
-    emit('  <Tab>/<S-Tab> switch · 1–5 jump · s/u stage · g? help · q quit',
-      nil, 'GitPanelHint')
   end
   -- in-progress merge/rebase/cherry-pick/revert banner
   if m.op then
@@ -522,10 +368,10 @@ local function render(m)
     local disp = rec.path
     if rec.orig then disp = rec.orig .. ' → ' .. rec.path end
     local prefix = '     ' .. letter .. '  '
-    local lnum = emit(prefix .. disp,
+    local lnum = emit(shorten(prefix .. disp, row_limit()),
       { kind = 'file', value = rec.path, orig = rec.orig, section = section_id,
         staged = staged, untracked = (letter == '?'),
-        conflict = (rec.badge == 'conflict') or nil })
+        conflict = (rec.badge == 'conflict') or nil, data = rec })
     local grp = 'GitPanelUnstaged'
     if rec.badge == 'conflict' or letter == 'U' then grp = 'GitPanelConflict'
     elseif letter == '?' then grp = 'GitPanelUntracked'
@@ -564,13 +410,15 @@ local function render(m)
     local glyph, glyph_hl = '', nil
     local g = c.sig and sig_glyphs[c.sig]
     if g then glyph, glyph_hl = g[1] .. ' ', g[2] end
-    local lnum = emit(prefix .. c.sha .. '  ' .. glyph .. c.subject .. refs,
-      { kind = 'commit', value = c.sha, section = section_id })
+    local full_row = prefix .. c.sha .. '  ' .. glyph .. c.subject .. refs
+    local row = shorten(full_row, row_limit())
+    local lnum = emit(row,
+      { kind = 'commit', value = c.sha, section = section_id, data = c })
     span(lnum, #prefix, #prefix + #c.sha, 'GitPanelHash')
     if glyph_hl then
       span(lnum, #prefix + #c.sha + 2, #prefix + #c.sha + 2 + #glyph, glyph_hl)
     end
-    if refs ~= '' then
+    if refs ~= '' and row == full_row then
       span(lnum, #prefix + #c.sha + 2 + #glyph + #c.subject, -1, 'GitPanelRef')
     end
   end
@@ -584,27 +432,6 @@ local function render(m)
     if date ~= '' then
       span(lnum, #prefix + #e.short + 2, #prefix + #e.short + 2 + #e.date, 'GitPanelHint')
     end
-  end
-
-  local function shorten(text, limit)
-    text = tostring(text or '')
-    if fn.strdisplaywidth(text) <= limit then return text end
-    local chars = fn.strchars(text)
-    while chars > 1 do
-      local candidate = fn.strcharpart(text, 0, chars - 1) .. '…'
-      if fn.strdisplaywidth(candidate) <= limit then return candidate end
-      chars = chars - 1
-    end
-    return '…'
-  end
-
-  local function one_line(text)
-    return trim(tostring(text or ''):gsub('%c', ' '):gsub('%s+', ' '))
-  end
-
-  local function row_limit()
-    if M.mode == 'split' then return PANEL_WIDTH - 3 end
-    return math.max(PANEL_WIDTH, math.min(vim.o.columns - 4, 120))
   end
 
   local function item_date(item)
@@ -689,54 +516,94 @@ local function render(m)
     span(lnum, 5, 5 + #number, item.draft and 'GitPanelGitHubMuted' or 'GitPanelGitHubNumber')
   end
 
-  -- ---- Branches (permanent) --------------------------------------------
-  section('branches', 'Branches', #m.branches, function()
-    -- for-each-ref trackshort, translated into the panel's glyph language:
-    -- in sync / ahead / behind / diverged
+  local function render_branches()
+    section('branches', 'Branches', #m.branches, function()
     local TRACK_GLYPH = { ['='] = '✓', ['>'] = '↑', ['<'] = '↓', ['<>'] = '↕' }
     for _, b in ipairs(m.branches) do
       local marker = b.current and '*' or ' '
       local row = '     ' .. marker .. ' ' .. b.name
       local tr = b.track ~= '' and (TRACK_GLYPH[b.track] or b.track) or ''
       if tr ~= '' then row = row .. '  ' .. tr end
-      -- branch checked out in ANOTHER worktree: show which folder holds it
       if b.worktree and not b.current then
         row = row .. '  ⊘ ' .. fn.fnamemodify(b.worktree, ':t')
       end
+      if M.mode == 'tab' and b.subject and b.subject ~= '' then
+        row = row .. '  ·  ' .. b.subject
+        if b.timestamp then row = row .. '  ' .. relative_time(b.timestamp) end
+      end
+      row = shorten(row, row_limit())
       local lnum = emit(row,
         { kind = 'branch', value = b.name, current = b.current, worktree = b.worktree,
-          upstream = b.upstream, remote = b.remote, remote_ref = b.remote_ref })
+          upstream = b.upstream, remote = b.remote, remote_ref = b.remote_ref, data = b })
       if b.current then span(lnum, 5, 7 + #b.name, 'GitPanelBranchCurrent')
       elseif b.worktree then span(lnum, 7 + #b.name, -1, 'GitPanelHint') end
     end
-  end)
-  emit('')
+    end)
+  end
 
-  -- ---- Worktrees (permanent) -------------------------------------------
-  section('worktrees', 'Worktrees', #m.worktrees, function()
-    for _, w in ipairs(m.worktrees) do
-      local marker = w.current and '*' or ' '
-      local flags = {}
-      if w.flags.locked then flags[#flags + 1] = 'locked' end
-      if w.flags.prunable then flags[#flags + 1] = 'prunable' end
-      local row = '     ' .. marker .. ' ' .. tilde(w.path) .. '   ' .. w.label
-      if #flags > 0 then row = row .. '  [' .. table.concat(flags, ',') .. ']' end
-      local lnum = emit(row, { kind = 'worktree', value = w.path, current = w.current })
-      if w.current then span(lnum, 5, #row, 'GitPanelWorktreeCurrent') end
-    end
-  end)
-  emit('')
+  local function render_worktrees()
+    section('worktrees', 'Worktrees', #m.worktrees, function()
+      for _, w in ipairs(m.worktrees) do
+        local marker = w.current and '*' or ' '
+        local flags = {}
+        if w.flags.locked then flags[#flags + 1] = 'locked' end
+        if w.flags.prunable then flags[#flags + 1] = 'prunable' end
+        local row = '     ' .. marker .. ' ' .. tilde(w.path) .. '   ' .. w.label
+        if #flags > 0 then row = row .. '  [' .. table.concat(flags, ',') .. ']' end
+        local lnum = emit(shorten(row, row_limit()),
+          { kind = 'worktree', value = w.path, current = w.current, data = w })
+        if w.current then span(lnum, 5, #row, 'GitPanelWorktreeCurrent') end
+      end
+    end)
+  end
+
+  local function render_stashes()
+    if #m.stashes == 0 then return end
+    section('stashes', 'Stashes', #m.stashes, function()
+      for _, stash in ipairs(m.stashes) do
+        local row = '     ' .. stash.name .. '  ' .. stash.subject
+        if stash.timestamp then row = row .. '  ·  ' .. relative_time(stash.timestamp) end
+        local lnum = emit(shorten(row, row_limit()),
+          { kind = 'stash', value = stash.name, data = stash, section = 'stashes' })
+        span(lnum, 5, 5 + #stash.name, 'GitPanelHash')
+      end
+    end)
+  end
+
+  local function render_tags()
+    if #m.tags == 0 then return end
+    section('tags', 'Tags', #m.tags, function()
+      for index = 1, math.min(#m.tags, 12) do
+        local tag = m.tags[index]
+        local row = '     ' .. tag.name
+        if tag.subject ~= '' then row = row .. '  ' .. tag.subject end
+        if tag.timestamp then row = row .. '  ·  ' .. relative_time(tag.timestamp) end
+        emit(shorten(row, row_limit()), { kind = 'tag', value = tag.name, data = tag, section = 'tags' })
+      end
+      if #m.tags > 12 then empty_row('… ' .. (#m.tags - 12) .. ' more tags') end
+    end)
+  end
+
+  local function render_recent(limit)
+    section('committed', 'Recent commits', math.min(#m.commits, limit), function()
+      if #m.commits == 0 then return empty_row('(no commits yet)') end
+      for index = 1, math.min(#m.commits, limit) do commit_row(m.commits[index], 'committed') end
+    end)
+  end
 
   -- ---- Changes region: divider that toggles the view --------------------
   local function divider(label, hint)
-    local lnum = emit('── ' .. label .. ' ' .. string.rep('─', math.max(2, 40 - #label)),
+    local lnum = emit('── ' .. label .. ' ' .. string.rep('─', math.max(2, row_limit() - #label - 4)),
       { kind = 'viewheader' }, 'GitPanelDivider')
     -- hint row only when it carries information the header hints don't
     if hint then emit('     ' .. hint, nil, 'GitPanelHint') end
   end
 
   if M.view == 'work' then
-    divider('Staged / Unstaged')
+    divider('Working tree')
+    if m.working_clean then
+      emit('     ✓ Working tree clean', { kind = 'clean' }, 'GitPanelStaged')
+    end
     if m.op or #m.conflicts > 0 then
       section('conflicts', 'Conflicts', #m.conflicts, function()
         if #m.conflicts == 0 then
@@ -745,19 +612,25 @@ local function render(m)
         for _, r in ipairs(m.conflicts) do conflict_row(r) end
       end)
     end
-    section('staged', 'Staged', #m.staged, function()
-      for _, r in ipairs(m.staged) do file_row(r, 'staged', true) end
-    end)
-    section('unstaged', 'Unstaged', #m.unstaged, function()
-      for _, r in ipairs(m.unstaged) do file_row(r, 'unstaged', false) end
-    end)
-    section('untracked', 'Untracked', #m.untracked, function()
-      for _, r in ipairs(m.untracked) do
-        file_row({ x = '?', y = '?', path = r.path }, 'untracked', false)
-      end
-    end)
+    if #m.staged > 0 then
+      section('staged', 'Staged', #m.staged, function()
+        for _, r in ipairs(m.staged) do file_row(r, 'staged', true) end
+      end)
+    end
+    if #m.unstaged > 0 then
+      section('unstaged', 'Unstaged', #m.unstaged, function()
+        for _, r in ipairs(m.unstaged) do file_row(r, 'unstaged', false) end
+      end)
+    end
+    if #m.untracked > 0 then
+      section('untracked', 'Untracked', #m.untracked, function()
+        for _, r in ipairs(m.untracked) do
+          file_row({ x = '?', y = '?', path = r.path }, 'untracked', false)
+        end
+      end)
+    end
     local ucount = (#m.unpushed > 50) and '50+' or #m.unpushed
-    section('unpushed', 'Committed (not pushed)', ucount, function()
+    section('unpushed', 'Outgoing commits', ucount, function()
       if #m.unpushed == 0 then
         -- the publish affordance is real information; plain emptiness is not
         if not m.has_remotes then empty_row('(no remote configured — P to publish)') end
@@ -769,19 +642,26 @@ local function render(m)
         empty_row('… more commits not shown (see ↑ ahead-count in the header)')
       end
     end)
-    section('pushed', 'Pushed', #m.pushes, function()
-      for _, e in ipairs(m.pushes) do push_row(e) end
-    end)
+    if #m.pushes > 0 then
+      section('pushed', 'Recent push events', #m.pushes, function()
+        for _, e in ipairs(m.pushes) do push_row(e) end
+      end)
+    end
+    render_recent(M.mode == 'split' and 5 or 8)
+    render_branches()
+    render_stashes()
+    render_worktrees()
   elseif M.view == 'history' then
-    divider('Committed / Uncommitted')
+    divider('Repository history')
     section('uncommitted', 'Uncommitted', #m.uncommitted, function()
       if #m.uncommitted == 0 then return empty_row('(working tree clean)') end
       for _, r in ipairs(m.uncommitted) do file_row(r, 'uncommitted', r.x ~= '.' and r.x ~= '?') end
     end)
-    section('committed', 'Committed (recent)', nil, function()
-      if #m.commits == 0 then return empty_row('(no commits yet)') end
-      for _, c in ipairs(m.commits) do commit_row(c, 'committed') end
-    end)
+    render_recent(M.mode == 'split' and 20 or 30)
+    render_branches()
+    render_tags()
+    render_stashes()
+    render_worktrees()
   else
     local view = VIEWS[VIEW_INDEX[M.view]] or { label = M.view }
     local remote = m.github or {}
@@ -833,6 +713,16 @@ local function render(m)
         end
       end)
     end
+  end
+
+  emit('')
+  if is_github_view(M.view) then
+    emit('  <CR> details · gx browser · r sync · g? help · q quit', nil, 'GitPanelHint')
+  elseif M.mode == 'split' then
+    emit('  Tab cycle · 1–5 jump · s/u stage · g? help · q quit', nil, 'GitPanelHint')
+  else
+    emit('  <Tab>/<S-Tab> switch · 1–5 jump · s/u stage · <CR> inspect · g? help · q quit',
+      nil, 'GitPanelHint')
   end
 
   return lines, map, hls
@@ -904,10 +794,182 @@ local function find_win()
   return nil
 end
 
+local function detail_is_valid()
+  return M.detail_buf and api.nvim_buf_is_valid(M.detail_buf)
+    and M.detail_win and api.nvim_win_is_valid(M.detail_win)
+end
+
+local function ensure_detail_buf()
+  if M.detail_buf and api.nvim_buf_is_valid(M.detail_buf) then return M.detail_buf end
+  local buf = api.nvim_create_buf(false, true)
+  local o = function(name, value) api.nvim_set_option_value(name, value, { buf = buf }) end
+  o('buftype', 'nofile'); o('bufhidden', 'hide'); o('swapfile', false)
+  o('buflisted', false); o('filetype', 'gitpaneldetail'); o('modifiable', false)
+  pcall(api.nvim_buf_set_name, buf, 'gitpanel://context')
+  vim.keymap.set('n', 'q', function() M.close() end,
+    { buffer = buf, nowait = true, silent = true, desc = 'Close GitPanel' })
+  M.detail_buf = buf
+  return buf
+end
+
+local function set_detail(lines, filetype)
+  if not detail_is_valid() then return end
+  lines = lines or {}
+  api.nvim_set_option_value('modifiable', true, { buf = M.detail_buf })
+  api.nvim_buf_set_lines(M.detail_buf, 0, -1, false, lines)
+  api.nvim_set_option_value('modifiable', false, { buf = M.detail_buf })
+  api.nvim_set_option_value('filetype', filetype or 'gitpaneldetail', { buf = M.detail_buf })
+end
+
+local function detail_overview()
+  local model = M.model
+  if not model then return { '  Repository context', '', '  ◌ Reading repository state…' } end
+  local lines = { '  Repository overview', '', '  ' .. fn.fnamemodify(M.root or '', ':t'),
+    '  ' .. tilde(M.root or ''), '' }
+  local head = model.head or {}
+  lines[#lines + 1] = '  Branch       ' .. (head.branch or ('detached @ ' .. (head.sha or '?')))
+  lines[#lines + 1] = '  Upstream     ' .. (head.upstream or 'not configured')
+  lines[#lines + 1] = '  Working tree ' .. (model.working_clean and 'clean' or
+    (#model.uncommitted .. ' changed paths'))
+  lines[#lines + 1] = '  Sync         ' .. (model.synced and 'up to date' or
+    ('↑' .. (head.ahead or 0) .. '  ↓' .. (head.behind or 0)))
+  lines[#lines + 1] = '  History      ' .. tostring(model.commit_count or 0) .. ' commits'
+
+  local snapshot = model.github_snapshots and model.github_snapshots.overview
+  local overview = snapshot and (snapshot.items or {})[1]
+  if overview then
+    lines[#lines + 1] = ''
+    lines[#lines + 1] = '  GitHub'
+    lines[#lines + 1] = '  ' .. (overview.full_name or overview.name or '') ..
+      '  ·  ' .. (overview.visibility or 'unknown')
+    if overview.default_branch then
+      lines[#lines + 1] = '  Default      ' .. overview.default_branch
+    end
+    if overview.description and overview.description ~= '' then
+      lines[#lines + 1] = ''
+      lines[#lines + 1] = '  ' .. overview.description
+    end
+  elseif snapshot and snapshot.status == 'loading' then
+    lines[#lines + 1] = ''
+    lines[#lines + 1] = '  ◌ Loading GitHub repository context…'
+  end
+
+  lines[#lines + 1] = ''
+  lines[#lines + 1] = '  Remotes'
+  if #model.remote_details == 0 then
+    lines[#lines + 1] = '  No remotes configured'
+  else
+    for _, remote in ipairs(model.remote_details) do
+      lines[#lines + 1] = '  ' .. remote.name .. '  ' .. (remote.fetch_url or remote.push_url or '')
+    end
+  end
+  lines[#lines + 1] = ''
+  lines[#lines + 1] = ('  %d branches  ·  %d worktrees  ·  %d tags  ·  %d stashes')
+    :format(#model.branches, #model.worktrees, #model.tags, #model.stashes)
+  lines[#lines + 1] = ''
+  lines[#lines + 1] = '  Move the cursor to preview a change, commit, branch, tag, stash, or worktree.'
+  return lines
+end
+
+local function detail_git(args, cwd, title, leading, filetype)
+  M.detail_generation = M.detail_generation + 1
+  local generation = M.detail_generation
+  local loading = { '  ' .. title, '', '  ◌ Loading preview…' }
+  set_detail(loading, filetype)
+  local command = { 'git' }
+  vim.list_extend(command, args)
+  vim.system(command, { text = true, cwd = cwd or M.root,
+    env = { LC_ALL = 'C', GIT_OPTIONAL_LOCKS = '0' } }, function(result)
+    vim.schedule(function()
+      if generation ~= M.detail_generation or not detail_is_valid() then return end
+      local lines = { '  ' .. title, '' }
+      for _, line in ipairs(leading or {}) do lines[#lines + 1] = '  ' .. line end
+      if #(leading or {}) > 0 then lines[#lines + 1] = '' end
+      local output = result.stdout or ''
+      if output == '' then output = result.stderr or '' end
+      local output_lines = vim.split(output:gsub('%s+$', ''), '\n', { plain = true })
+      if #output_lines == 1 and output_lines[1] == '' then
+        output_lines = { '(no diff or additional detail)' }
+      end
+      for index = 1, math.min(#output_lines, 400) do lines[#lines + 1] = output_lines[index] end
+      if #output_lines > 400 then lines[#lines + 1] = '… preview truncated at 400 lines' end
+      set_detail(lines, filetype)
+    end)
+  end)
+end
+
+function M.update_detail()
+  if not detail_is_valid() then return end
+  local panel_win = find_win()
+  local item = panel_win and M.line_map[api.nvim_win_get_cursor(panel_win)[1]] or nil
+  if not item or item.kind == 'head' or item.kind == 'section'
+      or item.kind == 'viewheader' or item.kind == 'clean' then
+    M.detail_generation = M.detail_generation + 1
+    return set_detail(detail_overview())
+  end
+
+  if item.kind == 'file' then
+    local title = (item.staged and 'Staged change · ' or 'Working change · ') .. item.value
+    local args
+    if item.untracked then
+      args = { 'diff', '--no-index', '--', '/dev/null', M.root .. '/' .. item.value }
+    elseif item.staged then
+      args = { 'diff', '--cached', '--', item.value }
+    else
+      args = { 'diff', '--', item.value }
+    end
+    return detail_git(args, M.root, title, nil, 'diff')
+  elseif item.kind == 'commit' then
+    return detail_git({ 'show', '--stat', '--format=fuller', item.value }, M.root,
+      'Commit · ' .. item.value, nil, 'git')
+  elseif item.kind == 'branch' then
+    local data = item.data or {}
+    local info = { data.current and 'Current branch' or 'Local branch' }
+    if data.upstream then info[#info + 1] = 'Upstream: ' .. data.upstream end
+    if data.worktree then info[#info + 1] = 'Worktree: ' .. tilde(data.worktree) end
+    return detail_git({ 'log', '-1', '--decorate=short', '--stat', '--format=fuller', item.value },
+      M.root, 'Branch · ' .. item.value, info, 'git')
+  elseif item.kind == 'worktree' then
+    return detail_git({ 'status', '--short', '--branch' }, item.value,
+      'Worktree · ' .. tilde(item.value), nil, 'git')
+  elseif item.kind == 'stash' then
+    return detail_git({ 'stash', 'show', '--stat', '--patch', item.value }, M.root,
+      'Stash · ' .. item.value, nil, 'diff')
+  elseif item.kind == 'tag' then
+    return detail_git({ 'show', '--stat', '--format=fuller', item.value }, M.root,
+      'Tag · ' .. item.value, nil, 'git')
+  elseif item.kind == 'push' then
+    local range = item.old and (item.old .. '..' .. item.value) or item.value
+    return detail_git({ 'log', '--stat', '--oneline', range }, M.root,
+      'Push event · ' .. tostring(item.value):sub(1, 7), nil, 'git')
+  elseif item.kind == 'github' then
+    M.detail_generation = M.detail_generation + 1
+    local data = item.data or {}
+    local lines = { '  GitHub · ' .. (data.kind or item.resource or 'item'), '',
+      '  ' .. (data.title or data.name or data.full_name or '(untitled)'), '' }
+    local fields = { { 'State', data.conclusion or data.status or data.state },
+      { 'Author', data.author or data.actor }, { 'Branch', data.branch },
+      { 'From', data.head }, { 'Into', data.base }, { 'Updated', data.updated_at },
+      { 'URL', data.url } }
+    for _, field in ipairs(fields) do
+      if field[2] ~= nil and field[2] ~= '' then
+        lines[#lines + 1] = ('  %-10s %s'):format(field[1], tostring(field[2]))
+      end
+    end
+    if data.body and data.body ~= '' then
+      lines[#lines + 1] = ''; lines[#lines + 1] = '  Description'; lines[#lines + 1] = ''
+      vim.list_extend(lines, vim.split(data.body, '\n', { plain = true }))
+    end
+    return set_detail(lines, 'markdown')
+  end
+  M.detail_generation = M.detail_generation + 1
+  set_detail(detail_overview())
+end
+
 local function request_github_view(view, force)
-  if not is_github_view(view) then return end
+  if view ~= 'overview' and not is_github_view(view) then return end
   local state = github_state(view)
-  if state.status == 'loading' then return end
+  if state.status == 'loading' and not force then return end
   local previous_repository = github_runtime.repository and
     (github_runtime.repository.host .. '/' .. github_runtime.repository.repository) or nil
   if force then
@@ -955,18 +1017,28 @@ local function request_github_view(view, force)
         state.updated_at = os.time()
         state.transport = metadata and metadata.transport or nil
       end
-      if M.view == view and M.buf and api.nvim_buf_is_valid(M.buf) then
-        M.refresh({ skip_remote_fetch = true })
+      if M.model and M.buf and api.nvim_buf_is_valid(M.buf) then
+        M.refresh({ skip_remote_fetch = true, reuse_model = true })
       end
     end)
   end)
 end
 
+
+local function request_github_dashboard(force)
+  for _, view in ipairs({ 'overview', 'actions', 'issues', 'pulls' }) do
+    request_github_view(view, force)
+    -- A forced refresh resets the shared runtime once. Subsequent views must
+    -- use that fresh client without resetting the requests just started.
+    force = false
+  end
+end
+
 function M.refresh(opts)
   opts = opts or {}
   if not (M.buf and api.nvim_buf_is_valid(M.buf)) then return end
-  if is_github_view(M.view) and not opts.skip_remote_fetch then
-    request_github_view(M.view, opts.force_remote == true)
+  if not opts.skip_remote_fetch then
+    request_github_dashboard(opts.force_remote == true)
   end
   local win = find_win()
   -- remember the logical item under the cursor to restore it after rebuild
@@ -980,34 +1052,57 @@ function M.refresh(opts)
     if it then prev_key = item_key(it) end
   end
 
-  local model = gather()
-  if is_github_view(M.view) then model.github = github_snapshot(M.view) end
-  local lines, map, hls = render(model)
-  M.line_map = map
-  with_writable(function() api.nvim_buf_set_lines(M.buf, 0, -1, false, lines) end)
+  local function apply_model(model)
+    if not (M.buf and api.nvim_buf_is_valid(M.buf)) then return end
+    local snapshots = github_dashboard_snapshot()
+    model.github_snapshots = snapshots
+    model.github_summary = github_summary(snapshots)
+    if is_github_view(M.view) then model.github = snapshots[M.view] end
+    local lines, map, hls = render(model)
+    M.model, M.line_map = model, map
+    with_writable(function() api.nvim_buf_set_lines(M.buf, 0, -1, false, lines) end)
 
-  api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
-  for _, h in ipairs(hls) do
-    pcall(api.nvim_buf_set_extmark, M.buf, ns, h.line, h.cs,
-      { end_col = (h.ce == -1) and nil or h.ce, end_row = (h.ce == -1) and h.line + 1 or nil,
-        hl_group = h.group })
-  end
+    api.nvim_buf_clear_namespace(M.buf, ns, 0, -1)
+    for _, h in ipairs(hls) do
+      pcall(api.nvim_buf_set_extmark, M.buf, ns, h.line, h.cs,
+        { end_col = (h.ce == -1) and nil or h.ce,
+          end_row = (h.ce == -1) and h.line + 1 or nil, hl_group = h.group })
+    end
 
-  if win and prev_key then
-    for lnum, it in pairs(map) do
-      if item_key(it) == prev_key then
-        pcall(api.nvim_win_set_cursor, win, { lnum, 0 })
-        break
+    if win and api.nvim_win_is_valid(win) and prev_key then
+      for lnum, it in pairs(map) do
+        if item_key(it) == prev_key then
+          pcall(api.nvim_win_set_cursor, win, { lnum, 0 })
+          break
+        end
       end
     end
+    if M.update_detail then M.update_detail() end
   end
+
+  if opts.reuse_model and M.model then return apply_model(M.model) end
+
+  M.model_generation = M.model_generation + 1
+  local generation, root = M.model_generation, M.root
+  if not M.model then
+    with_writable(function()
+      api.nvim_buf_set_lines(M.buf, 0, -1, false, {
+        '  GitPanel', '', '  ◌ Reading repository state…', '',
+        '  Git commands are running concurrently; Neovim remains responsive.',
+      })
+    end)
+  end
+  local_model.gather(root, {}, function(model)
+    if generation ~= M.model_generation or root ~= M.root then return end
+    apply_model(model)
+  end)
 end
 
-local function set_win_opts(win)
+local function set_win_opts(win, fixed_width)
   local w = function(n, v) api.nvim_set_option_value(n, v, { win = win }) end
   w('number', false); w('relativenumber', false); w('signcolumn', 'no')
   w('cursorline', true); w('wrap', false); w('list', false); w('foldcolumn', '0')
-  w('winfixwidth', true)
+  w('winfixwidth', fixed_width == true)
 end
 
 local function ensure_buf()
@@ -1019,21 +1114,65 @@ local function ensure_buf()
   pcall(api.nvim_buf_set_name, buf, 'gitpanel://status')
   M.buf = buf
   M.attach_keys()
+  api.nvim_create_autocmd('CursorMoved', {
+    buffer = buf,
+    callback = function()
+      M.cursor_generation = M.cursor_generation + 1
+      local generation = M.cursor_generation
+      vim.defer_fn(function()
+        if generation == M.cursor_generation then M.update_detail() end
+      end, 70)
+    end,
+  })
   return buf
+end
+
+local function close_detail()
+  M.detail_generation = M.detail_generation + 1
+  if M.detail_win and api.nvim_win_is_valid(M.detail_win) then
+    pcall(api.nvim_win_close, M.detail_win, true)
+  end
+  M.detail_win = nil
+end
+
+local function ensure_detail_layout()
+  if M.mode ~= 'tab' or vim.o.columns < WIDE_MIN_COLUMNS
+      or not (M.win and api.nvim_win_is_valid(M.win)) then
+    close_detail()
+    return
+  end
+  if not detail_is_valid() then
+    api.nvim_set_current_win(M.win)
+    vim.cmd('rightbelow vsplit')
+    M.detail_win = api.nvim_get_current_win()
+    api.nvim_win_set_buf(M.detail_win, ensure_detail_buf())
+    set_win_opts(M.detail_win, false)
+    api.nvim_set_option_value('cursorline', false, { win = M.detail_win })
+    api.nvim_set_option_value('wrap', true, { win = M.detail_win })
+  end
+  local target = math.max(DETAIL_MIN_WIDTH, math.floor(vim.o.columns * 0.35))
+  pcall(api.nvim_win_set_width, M.detail_win, target)
+  api.nvim_set_current_win(M.win)
+  M.update_detail()
 end
 
 local function open_tab()
   vim.cmd('tabnew')
+  M.mode = 'tab'
+  M.tab = api.nvim_get_current_tabpage()
   M.win = api.nvim_get_current_win()
   api.nvim_win_set_buf(M.win, M.buf)
-  set_win_opts(M.win); M.mode = 'tab'
+  set_win_opts(M.win, false)
+  ensure_detail_layout()
 end
 local function open_split()
+  close_detail()
   vim.cmd('topleft vsplit')
+  M.mode = 'split'; M.tab = nil
   M.win = api.nvim_get_current_win()
   api.nvim_win_set_buf(M.win, M.buf)
   api.nvim_win_set_width(M.win, PANEL_WIDTH)
-  set_win_opts(M.win); M.mode = 'split'
+  set_win_opts(M.win, true)
 end
 
 local function detect_root()
@@ -1077,7 +1216,11 @@ function M.open(mode)
       vim.log.levels.WARN)
     return
   end
-  if M.root ~= root then reset_github_runtime(root) end
+  if M.root ~= root then
+    reset_github_runtime(root)
+    M.model = nil
+    M.model_generation = M.model_generation + 1
+  end
   M.root = root
   ensure_buf()
   local existing = find_win()
@@ -1094,6 +1237,18 @@ end
 function M.close()
   local win = find_win()
   if not win then return end
+  if M.mode == 'tab' and M.tab and api.nvim_tabpage_is_valid(M.tab) then
+    api.nvim_set_current_tabpage(M.tab)
+    if fn.tabpagenr('$') > 1 then
+      vim.cmd('tabclose')
+    else
+      close_detail()
+      api.nvim_set_current_win(win)
+      vim.cmd('enew')
+    end
+    M.win, M.mode, M.tab, M.detail_win = nil, nil, nil, nil
+    return
+  end
   local last_win = #api.nvim_tabpage_list_wins(0) == 1
   local last_tab = fn.tabpagenr('$') == 1
   if last_win and last_tab then
@@ -1101,7 +1256,7 @@ function M.close()
   else
     pcall(api.nvim_win_close, win, true)
   end
-  M.win, M.mode = nil, nil
+  M.win, M.mode, M.tab = nil, nil, nil
 end
 
 function M.toggle_layout()
@@ -1112,9 +1267,14 @@ function M.toggle_layout()
   -- Vacate the current panel window before building the new layout, so the
   -- panel buffer is never left showing in a stranded second window. Close it
   -- outright when something else would remain; otherwise swap in a scratch buf.
-  if #api.nvim_tabpage_list_wins(0) > 1 or fn.tabpagenr('$') > 1 then
+  if M.mode == 'tab' and fn.tabpagenr('$') > 1 then
+    vim.cmd('tabclose')
+    M.detail_win, M.tab = nil, nil
+  elseif #api.nvim_tabpage_list_wins(0) > 1 or fn.tabpagenr('$') > 1 then
+    close_detail()
     pcall(api.nvim_win_close, win, true)
   else
+    close_detail()
     api.nvim_win_set_buf(win, api.nvim_create_buf(false, true))
   end
   if target == 'tab' then open_tab() else open_split() end
@@ -1125,7 +1285,7 @@ function M.select_view(view)
   local index = type(view) == 'number' and view or VIEW_INDEX[view]
   if not index or not VIEWS[index] then return end
   M.view = VIEWS[index].id
-  M.refresh()
+  M.refresh({ reuse_model = true })
 end
 
 function M.toggle_view(direction)
@@ -1138,15 +1298,14 @@ end
 function M.previous_view() M.toggle_view(-1) end
 
 function M.manual_refresh()
-  if is_github_view(M.view) then M.refresh({ force_remote = true })
-  else M.refresh() end
+  M.refresh({ force_remote = true })
 end
 
 function M.toggle_fold()
   local it = M.line_map[api.nvim_win_get_cursor(0)[1]]
   if it and it.section then
     M.folds[it.section] = not M.folds[it.section]
-    M.refresh()
+    M.refresh({ skip_remote_fetch = true, reuse_model = true })
   elseif it and it.kind == 'viewheader' then
     M.toggle_view()
   end
@@ -2186,6 +2345,17 @@ define_hl()
 api.nvim_create_autocmd('ColorScheme', {
   group = api.nvim_create_augroup('GitPanelHl', { clear = true }),
   callback = define_hl,
+})
+api.nvim_create_autocmd({ 'VimResized', 'WinResized' }, {
+  group = api.nvim_create_augroup('GitPanelLayout', { clear = true }),
+  callback = function()
+    if not find_win() then return end
+    vim.schedule(function()
+      if not find_win() then return end
+      ensure_detail_layout()
+      M.refresh({ skip_remote_fetch = true, reuse_model = true })
+    end)
+  end,
 })
 
 return M
