@@ -1,0 +1,27 @@
+name: Notify nvim-config
+
+on:
+  push:
+    branches:
+      - bet
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    name: request focused lock refresh
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Dispatch GitPanel production update
+        env:
+          GH_TOKEN: ${{ secrets.NVIM_CONFIG_DISPATCH_TOKEN }}
+        run: |
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::notice title=nvim-config dispatch skipped::Configure NVIM_CONFIG_DISPATCH_TOKEN to enable cross-repository lock refreshes."
+            exit 0
+          fi
+          gh api --method POST repos/777lotto/nvim-config/dispatches \
+            --raw-field event_type=plugin-release \
+            --field 'client_payload[plugin]=git-panel.nvim'
