@@ -1,6 +1,7 @@
 local github = require("git_panel.github")
 local help = require("git_panel.help")
 local local_model = require("git_panel.model")
+local signed_merge = require("git_panel.signed_merge")
 
 local function equal(actual, expected, message)
   assert(actual == expected, (message or "values differ") ..
@@ -103,14 +104,27 @@ local function test_normalization()
       title = "GitHub tabs",
       draft = true,
       user = { login = "octo" },
-      head = { ref = "feature" },
-      base = { ref = "bluff" },
+      head = {
+        ref = "feature",
+        sha = string.rep("a", 40),
+        label = "octo:feature",
+        repo = { full_name = "octo/widgets" },
+      },
+      base = {
+        ref = "bluff",
+        sha = string.rep("b", 40),
+        repo = { full_name = "octo/widgets" },
+      },
       html_url = "https://github.com/octo/widgets/pull/7",
     },
   })
   equal(#pulls, 1)
   equal(pulls[1].head, "feature")
+  equal(pulls[1].head_sha, string.rep("a", 40))
+  equal(pulls[1].head_label, "octo:feature")
+  equal(pulls[1].head_repository, "octo/widgets")
   equal(pulls[1].base, "bluff")
+  equal(pulls[1].base_repository, "octo/widgets")
   assert(pulls[1].draft, "draft pull request lost its state")
 end
 
@@ -149,6 +163,12 @@ local function test_transports_and_redaction()
   assert(result, "gh transport callback did not run")
   equal(result.metadata.transport, "gh")
   equal(#result.items, 1)
+  equal(captured.command[1], "gh")
+  equal(captured.command[2], "api")
+  equal(captured.command[3], "repos/octo/widgets/actions/runs?per_page=30")
+  assert(not vim.tbl_contains(captured.command, "--hostname"),
+    "gh-compatible wrappers must receive the endpoint before flags without a hostname override")
+  equal(captured.opts.env.GH_HOST, "github.com")
   equal(captured.opts.env.GH_TOKEN, token)
   assert(not table.concat(captured.command, " "):find(token, 1, true),
     "token leaked into gh command arguments")
@@ -228,6 +248,109 @@ local function test_transports_and_redaction()
   equal(github.redact("token=" .. token, { token }), "token=<redacted>")
 end
 
+local function test_signed_merge_backend()
+  local base_sha = string.rep("a", 40)
+  local head_sha = string.rep("b", 40)
+  local merge_sha = string.rep("c", 40)
+  local worktree = "/tmp/git-panel-signed-merge-fixture"
+
+  local function fixture(overrides)
+    overrides = overrides or {}
+    local commands = {}
+    local responses = {
+      validate_base = { code = 0, stdout = "", stderr = "" },
+      validate_head = { code = 0, stdout = "", stderr = "" },
+      fetch_base = { code = 0, stdout = "", stderr = "" },
+      resolve_base = { code = 0, stdout = base_sha .. "\n", stderr = "" },
+      fetch_head = { code = 0, stdout = "", stderr = "" },
+      resolve_head = { code = 0, stdout = (overrides.fetched_head or head_sha) .. "\n", stderr = "" },
+      add_worktree = { code = 0, stdout = "", stderr = "" },
+      merge = { code = 0, stdout = "", stderr = "" },
+      resolve_merge = { code = 0, stdout = merge_sha .. "\n", stderr = "" },
+      inspect_signature = {
+        code = 0,
+        stdout = overrides.commit or ("tree " .. string.rep("d", 40) .. "\n" ..
+          "parent " .. base_sha .. "\nparent " .. head_sha .. "\n" ..
+          "gpgsig -----BEGIN PGP SIGNATURE-----\n fixture\n\nmerge\n"),
+        stderr = "",
+      },
+      inspect_parents = {
+        code = 0,
+        stdout = merge_sha .. " " .. base_sha .. " " .. head_sha .. "\n",
+        stderr = "",
+      },
+      verify_base = { code = 0, stdout = "", stderr = "" },
+      push_base = { code = 0, stdout = "ok\n", stderr = "" },
+      delete_head = { code = 0, stdout = "ok\n", stderr = "" },
+      cleanup = { code = 0, stdout = "", stderr = "" },
+    }
+    local function runner(args, cwd, stage)
+      commands[#commands + 1] = { args = vim.deepcopy(args), cwd = cwd, stage = stage }
+      return assert(responses[stage], "unexpected signed merge stage: " .. tostring(stage))
+    end
+    local result, err = signed_merge.run({
+      root = "/tmp/repository",
+      remote = "origin",
+      repository = "octo/widgets",
+      number = 7,
+      title = "Signed Git backend",
+      base = "bluff",
+      head = "feature",
+      head_sha = head_sha,
+      head_label = "octo:feature",
+      head_repository = overrides.head_repository or "octo/widgets",
+    }, { run = runner, tempname = function() return worktree end })
+    return result, err, commands
+  end
+
+  local function command_for(commands, stage)
+    for _, command in ipairs(commands) do
+      if command.stage == stage then return command end
+    end
+    return nil
+  end
+
+  local result, err, commands = fixture()
+  assert(result and not err, vim.inspect(err))
+  equal(result.merge_sha, merge_sha)
+  assert(result.remote_branch_deleted, "same-repository head branch was not deleted")
+  local merge = assert(command_for(commands, "merge"))
+  equal(merge.cwd, worktree)
+  assert(vim.tbl_contains(merge.args, "--gpg-sign"), "signed_git did not require a signature")
+  assert(vim.tbl_contains(merge.args, "--no-ff"), "signed_git did not force a merge commit")
+  local push = assert(command_for(commands, "push_base"))
+  assert(not table.concat(push.args, " "):find("force", 1, true),
+    "signed merge base push must not force-update the base branch")
+  contains(table.concat(push.args, " "), merge_sha .. ":refs/heads/bluff")
+  local deletion = assert(command_for(commands, "delete_head"))
+  contains(table.concat(deletion.args, " "),
+    "--force-with-lease=refs/heads/feature:" .. head_sha)
+  assert(command_for(commands, "cleanup"), "temporary worktree was not removed")
+
+  local cross_result, cross_error, cross_commands = fixture({ head_repository = "fork/widgets" })
+  assert(cross_result and not cross_error, vim.inspect(cross_error))
+  assert(not cross_result.head_is_local and not cross_result.remote_branch_deleted,
+    "cross-repository head was treated as a local branch")
+  assert(not command_for(cross_commands, "delete_head"),
+    "signed_git attempted to delete a cross-repository head branch")
+
+  local stale_result, stale_error, stale_commands = fixture({ fetched_head = string.rep("e", 40) })
+  assert(not stale_result and stale_error.kind == "stale", "changed pull request head was not rejected")
+  assert(not command_for(stale_commands, "add_worktree"),
+    "stale pull request created a merge worktree")
+
+  local unsigned_result, unsigned_error, unsigned_commands = fixture({
+    commit = "tree " .. string.rep("d", 40) .. "\nparent " .. base_sha ..
+      "\nparent " .. head_sha .. "\n\nunsigned\n",
+  })
+  assert(not unsigned_result and unsigned_error.kind == "signing",
+    "unsigned merge commit was accepted")
+  assert(command_for(unsigned_commands, "cleanup"),
+    "unsigned merge did not clean its temporary worktree")
+  assert(not command_for(unsigned_commands, "push_base"),
+    "unsigned merge commit reached the push stage")
+end
+
 local function test_help_rendering()
   local rendered = help.render({ width = 64 })
   local text = table.concat(rendered.lines, "\n")
@@ -303,7 +426,8 @@ local function test_pull_request_mutations()
     code = 0, stdout = vim.json.encode({ merged = true }), stderr = "",
   })
   local merged
-  client:merge_pull(repository, 7, function(err, payload)
+  local reviewed_head = string.rep("a", 40)
+  client:merge_pull(repository, 7, reviewed_head, function(err, payload)
     assert(not err, vim.inspect(err))
     merged = payload
   end)
@@ -312,7 +436,16 @@ local function test_pull_request_mutations()
   contains(rendered, "--method PUT")
   contains(rendered, "repos/octo/widgets/pulls/7/merge")
   contains(capture.opts.stdin, "merge_method")
+  contains(capture.opts.stdin, reviewed_head)
   assert(not rendered:find(token, 1, true), "token leaked into gh mutation arguments")
+
+  local refused_client = stub_client("gh", {
+    code = 0, stdout = vim.json.encode({ merged = false, message = "Base branch changed" }), stderr = "",
+  })
+  local refused_error
+  refused_client:merge_pull(repository, 7, reviewed_head, function(err) refused_error = err end)
+  equal(refused_error.kind, "merge", "an unconfirmed API merge was treated as successful")
+  contains(refused_error.message, "Base branch changed")
 
   -- branch delete over curl: DELETE with an empty 204 body succeeds with nil data
   local curl_client, curl_capture = stub_client("curl", {
@@ -355,7 +488,8 @@ local function test_pull_request_mutations()
   guard_client:delete_branch(repository, "../evil", function(err) guard_errors[#guard_errors + 1] = err end)
   guard_client:comment_pull(repository, 7, "   ", function(err) guard_errors[#guard_errors + 1] = err end)
   guard_client:merge_pull(repository, nil, function(err) guard_errors[#guard_errors + 1] = err end)
-  equal(#guard_errors, 3, "unsafe mutations must be rejected before spawning")
+  guard_client:merge_pull(repository, 7, "not-a-sha", function(err) guard_errors[#guard_errors + 1] = err end)
+  equal(#guard_errors, 4, "unsafe mutations must be rejected before spawning")
   for _, err in ipairs(guard_errors) do
     equal(err.kind, "configuration")
   end
@@ -365,6 +499,7 @@ test_remote_parsing()
 test_normalization()
 test_transports_and_redaction()
 test_pull_request_mutations()
+test_signed_merge_backend()
 test_help_rendering()
 test_concurrent_local_snapshot()
 

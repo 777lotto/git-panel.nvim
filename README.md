@@ -93,7 +93,7 @@ point is `require("git_panel").open("tab")` or `.open("split")`.
 | `r` | Refresh local state and synchronize GitHub repository context |
 | `gx` | Open the selected GitHub item in a browser |
 | `go` / `gd` | Check out / diff the selected pull request against its base |
-| `gc` / `gm` | Comment on / merge the selected pull request (confirm; deletes its branch) |
+| `gc` / `gm` | Comment on / merge the selected pull request (confirm; uses the configured merge backend) |
 | `?` / `g?` | Show the highlighted, scrollable key guide |
 | `q` | Close |
 
@@ -141,15 +141,18 @@ states are shown inside the panel.
 - `<CR>` opens a Markdown summary in Neovim; `gx` opens the canonical GitHub URL.
 - On a pull-request row: `go` fetches and checks out the head branch, `gd`
   opens the full `base...head` diff in a buffer, `gc` posts a conversation
-  comment, and `gm` merges (merge commit), deletes the remote branch, prunes,
-  and — when you were on the PR branch — returns you to the base branch and
-  fast-forwards it. Merging requires a credential with write permission;
-  read-only tokens keep the view itself working and simply fail the write.
+  comment, and `gm` creates a merge commit using the configured backend. After
+  a merge, GitPanel deletes a same-repository remote head branch, prunes, and —
+  when you were on the PR branch — returns you to the base branch and
+  fast-forwards it. Cross-repository head branches are never deleted from the
+  base repository.
 
 Zero-configuration `gh` authentication is the preferred path: run
 `gh auth login`, or provide one of the token environment variables supported by
 GitHub CLI. GitPanel calls `gh api` directly and never copies the stored token
-into Lua configuration.
+into Lua configuration. `github.gh_command` may instead name a compatible API
+wrapper; GitPanel invokes `COMMAND api ENDPOINT [flags]` and supplies `GH_HOST`,
+so the wrapper does not need to expose the other `gh` command groups.
 
 Optional settings:
 
@@ -169,11 +172,44 @@ require("git_panel").setup({
     per_page = 30,             -- 1..100
     timeout = 15000,           -- milliseconds
     token_provider = nil,
+    merge_backend = "api",     -- "api" or "signed_git"
     gh_command = "gh",
     curl_command = "curl",
   },
 })
 ```
+
+`merge_backend = "api"` is the portable default. It asks GitHub to merge only
+if the head still matches the SHA shown in GitPanel and, for a same-repository
+pull request, deletes the head ref through the REST API.
+
+`merge_backend = "signed_git"` is an opt-in capability for anyone with Git
+commit signing and remote push authentication configured. It fetches the
+current base and the pull request's exact advertised head SHA, creates a
+`--no-ff --gpg-sign` merge in a temporary worktree, verifies that the result
+contains a cryptographic signature and two parents, then pushes the base with a
+normal non-force Git push. A same-repository head branch is deleted with an
+exact-SHA lease; a fork branch is left alone. If signing fails or the PR head
+changed, nothing is pushed and there is no unsigned or API fallback. Git's
+configured OpenPGP, SSH, or S/MIME signing format is used.
+
+For example, an API-only GitHub App wrapper can be combined with locally signed
+Git transport without coupling the two mechanisms:
+
+```lua
+require("git_panel").setup({
+  github = {
+    gh_command = vim.fn.expand("~/.local/bin/gh-app"),
+    merge_backend = "signed_git",
+  },
+})
+```
+
+The signed backend needs permission to push the base through the repository's
+existing Git remote. Branch protection, rulesets, and merge queues can reject
+that push; choose the API backend when GitHub must perform or queue the merge.
+Comments and all GitHub view data continue to use the selected API transport in
+either mode.
 
 The curl transport needs a bearer token for private repositories. A synchronous
 provider can read a short-lived token from an existing secret source:
@@ -215,12 +251,15 @@ require("git_panel").setup({
 
 GitHub App user access tokens and installation access tokens are supported as
 bearer tokens. The App needs repository **Actions: read**, **Issues: read**, and
-**Pull requests: read** permissions — plus **Pull requests: write** and
-**Contents: write** if you use the `gc`/`gm` pull-request actions. A raw App
-private key is deliberately not
-accepted: it is a long-lived signing credential used to mint an installation
-token, and should stay in an external helper or vault. Installation tokens
-expire after one hour, so GitPanel invokes the provider for every request batch.
+**Pull requests: read** permissions. `gc` additionally needs permission to
+write issue or pull-request comments (**Issues: write** or **Pull requests:
+write**). The API merge backend needs
+**Contents: write** for merging and same-repository branch deletion; the signed
+Git backend uses Git push authentication instead. A raw App private key is
+deliberately not accepted: it is a long-lived signing credential used to mint
+an installation token, and should stay in an external helper or vault.
+Installation tokens expire after one hour, so GitPanel invokes the provider for
+every request batch.
 See GitHub's documentation for [App authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/about-authentication-with-a-github-app)
 and [installation access tokens](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app).
 

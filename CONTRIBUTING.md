@@ -20,6 +20,7 @@ Run these from the repository root with Neovim 0.10 or newer:
 nvim --headless --clean -l scripts/check-lua.lua .
 nvim --headless -u tests/minimal_init.lua -l tests/unit.lua
 nvim --headless -u tests/minimal_init.lua -l tests/smoke.lua
+nvim --headless -u tests/minimal_init.lua -l tests/signed_merge.lua
 nvim --headless -u tests/minimal_init.lua -c "helptags doc" -c quit
 git diff --check
 git diff --exit-code -- doc/tags
