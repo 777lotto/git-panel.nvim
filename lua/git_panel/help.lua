@@ -60,7 +60,7 @@ local SECTIONS = {
     rows = {
       { keys = { '<CR>' }, description = 'Open an in-editor summary for a workflow run, issue, or pull request' },
       { keys = { 'gx' }, description = 'Open the selected item on GitHub' },
-      { keys = { 'r' }, description = 'Synchronize the active GitHub view now' },
+      { keys = { 'r' }, description = 'Synchronize repository metadata and every GitHub view now' },
       { keys = { 'go', 'gd' }, description = 'Check out / diff the selected pull request against its base' },
       { keys = { 'gc', 'gm' }, description = 'Comment on / merge the selected pull request (merge deletes its branch, after a confirm)' },
       { note = 'Issue and workflow data stay read-only; pull-request writes always confirm first. Local Git views never require network access.' },
@@ -69,9 +69,10 @@ local SECTIONS = {
   {
     title = 'Panel',
     rows = {
-      { keys = { 'L' }, description = 'Toggle between a full tab and the left split' },
-      { keys = { 'r' }, description = 'Refresh the current local view' },
+      { keys = { 'L' }, description = 'Toggle the responsive full tab / compact left split' },
+      { keys = { 'r' }, description = 'Refresh the concurrent local repository snapshot' },
       { keys = { '?', 'g?' }, description = 'Show this key guide' },
+      { note = 'At 120+ columns the tab layout adds a live context rail; move the cursor to preview the selected item.' },
     },
   },
 }

@@ -25,6 +25,13 @@ local function panel_text()
 end
 
 local github_fixtures = {
+  overview = {
+    {
+      kind = "overview", id = "1", name = "git-panel", full_name = "octo/git-panel",
+      description = "A focused Git workspace for Neovim.", visibility = "public",
+      default_branch = "bet", url = "https://github.com/octo/git-panel",
+    },
+  },
   actions = {
     {
       kind = "action", id = "101", number = 17, name = "CI", title = "test GitHub tabs",
@@ -87,12 +94,18 @@ local function run()
 
   assert(panel.mode == "split", "panel did not open in split mode")
   assert(vim.uv.fs_realpath(panel.root) == vim.uv.fs_realpath(fixture), "wrong repository root")
+  assert(vim.wait(2000, function()
+    return panel_text():find("▸ 1 Changes", 1, true) ~= nil
+  end), "asynchronous local repository snapshot did not render")
   local rendered = panel_text()
   assert_contains(rendered, "▸ 1 Changes")
   assert_contains(rendered, "  5 Pull Requests")
   assert_contains(rendered, "Branches")
   assert_contains(rendered, "Unstaged  (1)")
   assert_contains(rendered, "Untracked  (1)")
+  assert_contains(rendered, "Outgoing commits")
+  assert_contains(rendered, "Recent commits")
+  assert_contains(rendered, "Latest")
 
   panel.stage_all()
   local staged = git({ "diff", "--cached", "--name-only" })
@@ -189,8 +202,30 @@ local function run()
 
   panel.select_view(2)
   assert(panel.view == "history", "numeric view selection did not activate history")
+  vim.o.columns = 160
   panel.toggle_layout()
   assert(panel.mode == "tab", "layout did not toggle to tab mode")
+  assert(panel.detail_win and vim.api.nvim_win_is_valid(panel.detail_win),
+    "wide tab layout did not create the context rail")
+  vim.api.nvim_win_set_cursor(panel.win, { 1, 0 })
+  panel.update_detail()
+  assert_contains(table.concat(vim.api.nvim_buf_get_lines(panel.detail_buf, 0, -1, false), "\n"),
+    "Repository overview")
+  panel.select_view("work")
+  local tracked_line
+  for index, line in ipairs(vim.api.nvim_buf_get_lines(panel.buf, 0, -1, false)) do
+    if line:find("tracked.txt", 1, true) and not line:find("untracked.txt", 1, true) then
+      tracked_line = index
+      break
+    end
+  end
+  assert(tracked_line, "working-tree row was not rendered")
+  vim.api.nvim_win_set_cursor(panel.win, { tracked_line, 0 })
+  panel.update_detail()
+  assert(vim.wait(2000, function()
+    local detail = table.concat(vim.api.nvim_buf_get_lines(panel.detail_buf, 0, -1, false), "\n")
+    return detail:find("+changed", 1, true) ~= nil
+  end), "context rail did not render the selected file diff")
   panel.close()
 end
 
