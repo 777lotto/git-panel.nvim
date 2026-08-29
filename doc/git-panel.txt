@@ -115,7 +115,9 @@ states.
 
 GitPanel detects GitHub.com and *.ghe.com SSH/HTTPS remotes, preferring origin.
 Set github.host to identify a custom GitHub Enterprise Server host, or set
-github.repository to OWNER/REPO when remote discovery is unsuitable.
+github.repository to OWNER/REPO when remote discovery is unsuitable. For a
+proxy that mounts repositories under a path prefix, see
+|git-panel-github-proxy|.
 
 Repository metadata is fetched with the other cached views. The tab bar shows
 open issue and pull-request counts plus the latest workflow state; the context
@@ -134,7 +136,9 @@ Default configuration: >lua
         transport = "auto",       -- "auto", "gh", or "curl"
         repository = nil,          -- "OWNER/REPO"
         host = nil,                -- custom GitHub host
+        remote_path_prefix = nil,  -- proxy path segments before OWNER/REPO
         api_url = nil,             -- custom HTTPS REST base; auto selects curl
+        allow_insecure_http = false, -- permit a plaintext http:// api_url
         api_version = "2026-03-10",
         refresh_interval = 60,     -- seconds
         per_page = 30,             -- 1..100
@@ -153,6 +157,38 @@ the corresponding Enterprise variables follow GitHub CLI's own behavior.
 github.gh_command may name a compatible API-only wrapper. GitPanel invokes it
 as COMMAND api ENDPOINT [flags] and sets GH_HOST for the detected repository;
 the wrapper does not need to implement other gh command groups.
+
+PROXIED GITHUB ENDPOINTS                          *git-panel-github-proxy*
+
+A broker or reverse proxy may hold the credential, mount repositories under a
+fixed path prefix, and publish a GitHub-compatible REST API elsewhere. A remote
+such as https://proxy.example/github/git/OWNER/REPO.git is not discoverable by
+default, because everything after the host must be exactly OWNER/REPO.
+
+github.remote_path_prefix accepts a string or a list of strings and names the
+segments removed before OWNER/REPO is read. A prefix is stripped only when the
+remote carries it, so GitHub.com and *.ghe.com remotes are unaffected by a
+configured proxy. github.api_url points the curl transport at the proxy REST
+base and also makes that URL's host discoverable, so github.host is needed only
+when the Git and API hosts differ. >lua
+
+    require("git_panel").setup({
+      github = {
+        host = "proxy.example",
+        remote_path_prefix = "github/git",
+        api_url = "https://proxy.example/github/api",
+      },
+    })
+<
+A custom github.api_url selects the curl transport, so a proxy that injects the
+credential upstream needs no token_provider.
+
+github.allow_insecure_http permits a plaintext http:// github.api_url, for a
+proxy that terminates TLS upstream and exposes only a private-network endpoint.
+It relaxes the URL scheme check alone: GitPanel still refuses to send a bearer
+token over plaintext HTTP to a non-loopback host, so a configuration mistake
+cannot expose a credential on the wire. Use an https github.api_url when the
+endpoint itself requires a token.
 
 PULL-REQUEST MERGING                              *git-panel-github-merge*
 

@@ -27,10 +27,62 @@ local function is_cloud_host(host)
   return host == 'github.com' or host:match('%.ghe%.com$') ~= nil
 end
 
-local function is_supported_host(host, configured_host)
+-- A loopback endpoint never leaves the machine, so a plaintext base URL there
+-- cannot expose a bearer token to the network.
+local function is_loopback_host(host)
+  local normalized = host_without_port(host)
+  return normalized == 'localhost' or normalized == '::1' or normalized == '[::1]'
+    or normalized:match('^127%.%d+%.%d+%.%d+$') ~= nil
+    or normalized:match('%.localhost$') ~= nil
+end
+
+local function url_host(value)
+  local authority = trim(value):match('^%a[%w+.-]*://([^/]+)')
+  if not authority then return nil end
+  return (authority:match('@(.+)$') or authority):lower()
+end
+
+-- github.api_url names an endpoint the user already trusts, so its host counts
+-- as a GitHub host during remote discovery as well.
+local function is_supported_host(host, opts)
+  opts = opts or {}
   local normalized = host_without_port(host)
   if normalized == 'github.com' or normalized:match('%.ghe%.com$') then return true end
-  return configured_host ~= nil and normalized == host_without_port(configured_host)
+  -- Built without a table constructor: a nil github.host would truncate ipairs.
+  local candidates = {}
+  if opts.host then candidates[#candidates + 1] = opts.host end
+  local configured_api_host = url_host(opts.api_url)
+  if configured_api_host then candidates[#candidates + 1] = configured_api_host end
+  for _, candidate in ipairs(candidates) do
+    if normalized == host_without_port(candidate) then return true end
+  end
+  return false
+end
+
+-- Some deployments publish GitHub-compatible Git and REST endpoints behind a
+-- proxy that mounts repositories under a fixed path prefix, for example
+-- https://proxy.example/github/git/OWNER/REPO.git. Configured prefixes are
+-- removed before OWNER/REPO is read out of the remote path.
+local function path_prefixes(opts)
+  local configured = opts and opts.remote_path_prefix
+  if type(configured) == 'string' then configured = { configured } end
+  if type(configured) ~= 'table' then return {} end
+
+  local prefixes = {}
+  for _, entry in ipairs(configured) do
+    if type(entry) == 'string' then
+      local prefix = trim(entry):gsub('^/+', ''):gsub('/+$', '')
+      if prefix ~= '' then prefixes[#prefixes + 1] = prefix end
+    end
+  end
+  return prefixes
+end
+
+local function strip_path_prefix(path, prefixes)
+  for _, prefix in ipairs(prefixes) do
+    if path:sub(1, #prefix + 1) == prefix .. '/' then return path:sub(#prefix + 2) end
+  end
+  return path
 end
 
 local function validate_repository(owner, name)
@@ -38,9 +90,13 @@ local function validate_repository(owner, name)
   return owner and name and owner:match(safe) and name:match(safe)
 end
 
-local function valid_api_url(value)
-  return value:match('^https://[^/%s]+[^%s]*$') ~= nil
-    and value:find('[%c?#]') == nil
+local function valid_api_url(value, opts)
+  if value:find('[%c?#]') ~= nil then return false end
+  if value:match('^https://[^/%s]+[^%s]*$') ~= nil then return true end
+  -- Plaintext stays opt-in: a proxy on a private network often terminates TLS
+  -- upstream and exposes only a local http:// endpoint.
+  return (opts or {}).allow_insecure_http == true
+    and value:match('^http://[^/%s]+[^%s]*$') ~= nil
 end
 
 local function api_version(opts)
@@ -51,7 +107,7 @@ local function api_version(opts)
   return value
 end
 
-function M.parse_remote(remote_url)
+function M.parse_remote(remote_url, opts)
   local value = trim(remote_url)
   if value == '' then return nil end
 
@@ -66,6 +122,7 @@ function M.parse_remote(remote_url)
   if not host or not path then return nil end
 
   path = path:gsub('[?#].*$', ''):gsub('^/+', ''):gsub('/+$', ''):gsub('%.git$', '')
+  path = strip_path_prefix(path, path_prefixes(opts))
   local owner, name = path:match('^([^/]+)/([^/]+)$')
   if not validate_repository(owner, name) then return nil end
   if host_without_port(host) == 'ssh.github.com' then host = 'github.com' end
@@ -83,7 +140,7 @@ local function configured_repository(opts)
   local configured = trim(opts.repository)
   if configured == '' then return nil end
 
-  local parsed = M.parse_remote(configured)
+  local parsed = M.parse_remote(configured, opts)
   if parsed then
     if opts.host and host_without_port(opts.host) ~= host_without_port(parsed.host) then
       return nil, 'github.host does not match github.repository URL'
@@ -119,8 +176,8 @@ function M.resolve_repository(root, opts)
   local candidates = {}
   for line in (result.stdout or ''):gmatch('[^\r\n]+') do
     local name, remote_url = line:match('^remote%.([^%.]+)%.url%s+(.+)$')
-    local parsed = M.parse_remote(remote_url)
-    if name and parsed and is_supported_host(parsed.host, opts.host) then
+    local parsed = M.parse_remote(remote_url, opts)
+    if name and parsed and is_supported_host(parsed.host, opts) then
       parsed.remote = name
       candidates[#candidates + 1] = parsed
     end
@@ -460,10 +517,21 @@ function Client:_request_curl(repository, spec, token, callback)
     return callback({ kind = 'configuration', message = version_error })
   end
   local base_url = M.api_base(repository, self.opts)
-  if not valid_api_url(base_url) then
+  if not valid_api_url(base_url, self.opts) then
     return callback({
       kind = 'configuration',
-      message = 'github.api_url must be an HTTPS REST base without a query or fragment.',
+      message = 'github.api_url must be an HTTPS REST base without a query or fragment. '
+        .. 'Set github.allow_insecure_http = true to permit a plaintext http:// endpoint.',
+    })
+  end
+  -- A bearer token must never cross a plaintext hop that leaves this machine.
+  -- Proxies that inject the credential upstream need no token_provider at all.
+  if token and base_url:match('^http://') and not is_loopback_host(url_host(base_url)) then
+    return callback({
+      kind = 'configuration',
+      message = 'Refusing to send a GitHub token over plaintext HTTP to a non-loopback host. '
+        .. 'Use an https github.api_url, or drop github.token_provider when the proxy '
+        .. 'supplies the credential.',
     })
   end
   local url = base_url .. '/' .. spec.endpoint
