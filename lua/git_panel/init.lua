@@ -25,7 +25,9 @@ local DEFAULT_CONFIG = {
     transport = 'auto',
     host = nil,
     repository = nil,
+    remote_path_prefix = nil,
     api_url = nil,
+    allow_insecure_http = false,
     api_version = '2026-03-10',
     token_provider = nil,
     refresh_interval = 60,
@@ -682,6 +684,7 @@ local function render(m)
     if remote.repository_error then
       empty_row(one_line(remote.repository_error))
       empty_row('Configure github.repository = "OWNER/REPO" for an explicit override.')
+      empty_row('A proxied remote also needs github.remote_path_prefix + api_url.')
     elseif remote.error and #(remote.items or {}) == 0 then
       emit(shorten('     ⚠ ' .. one_line(remote.error.message), row_limit()),
         nil, 'GitPanelGitHubFailure')
@@ -1202,6 +1205,21 @@ function M.setup(opts)
   local merge_backend = M.config.github.merge_backend
   if merge_backend ~= 'api' and merge_backend ~= 'signed_git' then
     error('git_panel.setup(): github.merge_backend must be "api" or "signed_git"')
+  end
+  if type(M.config.github.allow_insecure_http) ~= 'boolean' then
+    error('git_panel.setup(): github.allow_insecure_http must be a boolean')
+  end
+  local prefix = M.config.github.remote_path_prefix
+  if prefix ~= nil then
+    if type(prefix) == 'string' then prefix = { prefix } end
+    if type(prefix) ~= 'table' then
+      error('git_panel.setup(): github.remote_path_prefix must be a string or list of strings')
+    end
+    for _, entry in ipairs(prefix) do
+      if type(entry) ~= 'string' then
+        error('git_panel.setup(): github.remote_path_prefix entries must be strings')
+      end
+    end
   end
   M.config.github.per_page = math.max(1, math.min(100,
     tonumber(M.config.github.per_page) or DEFAULT_CONFIG.github.per_page))

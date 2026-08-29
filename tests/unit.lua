@@ -495,7 +495,84 @@ local function test_pull_request_mutations()
   end
 end
 
+-- A GitHub-compatible proxy mounts repositories under a path prefix and may
+-- expose a plaintext REST base on a private network. Both are opt-in and must
+-- not change discovery or transport behaviour for github.com users.
+local function test_proxied_github_host()
+  local proxy = {
+    host = "proxy.example:8790",
+    api_url = "http://proxy.example:8790/github/api",
+    remote_path_prefix = "github/git",
+    allow_insecure_http = true,
+  }
+
+  local prefixed = assert(github.parse_remote(
+    "http://proxy.example:8790/github/git/octo/widgets.nvim.git", proxy))
+  equal(prefixed.host, "proxy.example:8790")
+  equal(prefixed.repository, "octo/widgets.nvim")
+  equal(github.api_base(prefixed, proxy), "http://proxy.example:8790/github/api")
+
+  -- a list of prefixes is accepted, and the prefix is only stripped when present
+  local listed = assert(github.parse_remote(
+    "ssh://git@proxy.example/mirror/octo/widgets.nvim.git",
+    { remote_path_prefix = { "github/git", "mirror" } }))
+  equal(listed.repository, "octo/widgets.nvim")
+  assert(github.parse_remote("https://github.com/octo/nested/widgets.nvim", proxy) == nil,
+    "an unprefixed nested path must not be read as OWNER/REPO")
+  local cloud = assert(github.parse_remote("git@github.com:octo/widgets.nvim.git", proxy))
+  equal(cloud.host, "github.com", "proxy settings must not disturb github.com remotes")
+
+  local function client_error(opts)
+    opts = vim.tbl_extend("force", { transport = "curl", root = ".",
+      executable = function() return true end,
+      schedule = function(callback) callback() end,
+      defer = function() end,
+      spawn = function(_, spawn_opts, callback)
+        callback({ code = 0, stdout = "{}\n200", stderr = "", stdin = spawn_opts.stdin })
+        return {}
+      end,
+    }, opts)
+    local captured, failure
+    local spawn = opts.spawn
+    opts.spawn = function(command, spawn_opts, callback)
+      captured = spawn_opts.stdin or ""
+      return spawn(command, spawn_opts, callback)
+    end
+    github.new(opts):fetch("overview", prefixed, function(err) failure = err end)
+    return failure, captured
+  end
+
+  local without_optin = client_error({ api_url = "http://proxy.example:8790/github/api" })
+  equal(without_optin.kind, "configuration", "plaintext must stay opt-in")
+  contains(without_optin.message, "allow_insecure_http")
+
+  local anonymous, anonymous_config = client_error({
+    api_url = "http://proxy.example:8790/github/api", allow_insecure_http = true })
+  assert(not anonymous, vim.inspect(anonymous))
+  assert(not anonymous_config:find("Authorization", 1, true),
+    "an anonymous proxy request must not send an Authorization header")
+
+  -- a credential must never cross a plaintext hop that leaves the machine
+  local leaked = client_error({
+    api_url = "http://proxy.example:8790/github/api",
+    allow_insecure_http = true,
+    token_provider = function() return "ghp_examplevalue" end,
+  })
+  equal(leaked.kind, "configuration")
+  contains(leaked.message, "plaintext")
+  assert(not leaked.message:find("ghp_examplevalue", 1, true), "token leaked into an error")
+
+  local loopback, loopback_config = client_error({
+    api_url = "http://127.0.0.1:8790/api/v3",
+    allow_insecure_http = true,
+    token_provider = function() return "ghp_examplevalue" end,
+  })
+  assert(not loopback, vim.inspect(loopback))
+  contains(loopback_config, "Authorization", "loopback stays trusted for tokens")
+end
+
 test_remote_parsing()
+test_proxied_github_host()
 test_normalization()
 test_transports_and_redaction()
 test_pull_request_mutations()

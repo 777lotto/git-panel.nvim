@@ -14,6 +14,12 @@ Notable changes are recorded here. Releases follow semantic versioning.
   curl transports, per-repository caches, explicit loading/error states, and
   in-editor or browser details.
 - GitHub.com, GHE.com, and configured GitHub Enterprise remote discovery.
+- `github.remote_path_prefix` and `github.allow_insecure_http`, which let the
+  Actions, Issues, and Pull Requests views work against a broker or reverse
+  proxy that mounts repositories under a path prefix and publishes a
+  GitHub-compatible REST API, including a plaintext private-network endpoint.
+  A configured `github.api_url` host is now discoverable as well. Default
+  GitHub.com and GHE behaviour is unchanged.
 - `setup()` options for GitHub transport, repository overrides, cache timing,
   and synchronous or asynchronous short-lived token providers.
 - An opt-in `signed_git` pull-request merge backend that verifies the exact PR
@@ -36,6 +42,9 @@ Notable changes are recorded here. Releases follow semantic versioning.
 
 ### Security
 
+- A bearer token is never sent over plaintext HTTP to a non-loopback host, even
+  when `github.allow_insecure_http` is enabled; the request fails closed with a
+  configuration error instead.
 - GitHub credentials are never persisted, rendered, notified, or placed in
   process arguments. Raw GitHub App private keys remain outside Neovim; curl
   authorization headers travel over standard input.
