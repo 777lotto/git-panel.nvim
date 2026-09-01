@@ -4,6 +4,7 @@ local github = require('git_panel.github')
 local help_ui = require('git_panel.help')
 local local_model = require('git_panel.model')
 local signed_merge = require('git_panel.signed_merge')
+local connections = require('git_panel.connections')
 
 local VIEWS = {
   { id = 'work', label = 'Changes' },
@@ -22,6 +23,8 @@ local DEFAULT_CONFIG = {
   },
   github = {
     enabled = true,
+    profile = nil,
+    profiles = {},
     transport = 'auto',
     host = nil,
     repository = nil,
@@ -71,6 +74,7 @@ local github_runtime = {
   views = {},
   generation = 0,
 }
+local configured_github = vim.deepcopy(DEFAULT_CONFIG.github)
 
 -- ---------------------------------------------------------------------------
 -- git runner: argv only (no shell), explicit cwd, stable locale, no locks.
@@ -722,7 +726,7 @@ local function render(m)
 
   emit('')
   if is_github_view(M.view) then
-    emit('  <CR> details · gx browser · r sync · g? help · q quit', nil, 'GitPanelHint')
+    emit('  gC connection · gD doctor · r sync · q quit', nil, 'GitPanelHint')
   elseif M.mode == 'split' then
     emit('  Tab cycle · 1–5 jump · s/u stage · g? help · q quit', nil, 'GitPanelHint')
   else
@@ -1193,43 +1197,98 @@ local function detect_root()
   return chomp(r.stdout)
 end
 
+local function prepare_github_config(base, requested)
+  local effective, profile_error = connections.resolve(base, requested)
+  if not effective then return nil, profile_error end
+  local transport = effective.transport
+  if transport ~= 'auto' and transport ~= 'gh' and transport ~= 'curl' then
+    return nil, 'github.transport must be "auto", "gh", or "curl"'
+  end
+  local merge_backend = effective.merge_backend
+  if merge_backend ~= 'api' and merge_backend ~= 'signed_git' then
+    return nil, 'github.merge_backend must be "api" or "signed_git"'
+  end
+  if type(effective.allow_insecure_http) ~= 'boolean' then
+    return nil, 'github.allow_insecure_http must be a boolean'
+  end
+  local prefix = effective.remote_path_prefix
+  if prefix ~= nil then
+    if type(prefix) == 'string' then prefix = { prefix } end
+    if type(prefix) ~= 'table' then
+      return nil, 'github.remote_path_prefix must be a string or list of strings'
+    end
+    for _, entry in ipairs(prefix) do
+      if type(entry) ~= 'string' then
+        return nil, 'github.remote_path_prefix entries must be strings'
+      end
+    end
+  end
+  effective.per_page = math.max(1, math.min(100,
+    tonumber(effective.per_page) or DEFAULT_CONFIG.github.per_page))
+  effective.refresh_interval = math.max(0,
+    tonumber(effective.refresh_interval) or DEFAULT_CONFIG.github.refresh_interval)
+  effective.timeout = math.max(1000,
+    tonumber(effective.timeout) or DEFAULT_CONFIG.github.timeout)
+  return effective
+end
+
 function M.setup(opts)
   if opts ~= nil and type(opts) ~= 'table' then
     error('git_panel.setup() expects a table')
   end
-  M.config = vim.tbl_deep_extend('force', vim.deepcopy(DEFAULT_CONFIG), opts or {})
-  local transport = M.config.github.transport
-  if transport ~= 'auto' and transport ~= 'gh' and transport ~= 'curl' then
-    error('git_panel.setup(): github.transport must be "auto", "gh", or "curl"')
-  end
-  local merge_backend = M.config.github.merge_backend
-  if merge_backend ~= 'api' and merge_backend ~= 'signed_git' then
-    error('git_panel.setup(): github.merge_backend must be "api" or "signed_git"')
-  end
-  if type(M.config.github.allow_insecure_http) ~= 'boolean' then
-    error('git_panel.setup(): github.allow_insecure_http must be a boolean')
-  end
-  local prefix = M.config.github.remote_path_prefix
-  if prefix ~= nil then
-    if type(prefix) == 'string' then prefix = { prefix } end
-    if type(prefix) ~= 'table' then
-      error('git_panel.setup(): github.remote_path_prefix must be a string or list of strings')
-    end
-    for _, entry in ipairs(prefix) do
-      if type(entry) ~= 'string' then
-        error('git_panel.setup(): github.remote_path_prefix entries must be strings')
-      end
-    end
-  end
-  M.config.github.per_page = math.max(1, math.min(100,
-    tonumber(M.config.github.per_page) or DEFAULT_CONFIG.github.per_page))
-  M.config.github.refresh_interval = math.max(0,
-    tonumber(M.config.github.refresh_interval) or DEFAULT_CONFIG.github.refresh_interval)
-  M.config.github.timeout = math.max(1000,
-    tonumber(M.config.github.timeout) or DEFAULT_CONFIG.github.timeout)
+  local merged = vim.tbl_deep_extend('force', vim.deepcopy(DEFAULT_CONFIG), opts or {})
+  configured_github = vim.deepcopy(merged.github)
+  local effective, config_error = prepare_github_config(configured_github, configured_github.profile)
+  if not effective then error('git_panel.setup(): ' .. config_error) end
+  merged.github = effective
+  M.config = merged
   reset_github_runtime(M.root)
   if M.buf and api.nvim_buf_is_valid(M.buf) then M.refresh() end
   return M
+end
+
+local function active_connection_label()
+  return connections.label(configured_github, M.config.github.profile)
+end
+
+function M.connection_profiles()
+  local choices, choices_error = connections.choices(configured_github, M.config.github.profile)
+  if not choices then error('git_panel: ' .. choices_error) end
+  return choices
+end
+
+function M.connection_profile_names()
+  local names = {}
+  for _, choice in ipairs(M.connection_profiles()) do names[#names + 1] = choice.id end
+  return names
+end
+
+local function activate_connection(profile)
+  local effective, config_error = prepare_github_config(configured_github, profile)
+  if not effective then
+    vim.notify('GitPanel connection: ' .. config_error, vim.log.levels.ERROR)
+    return false
+  end
+  M.config.github = effective
+  reset_github_runtime(M.root)
+  if M.buf and api.nvim_buf_is_valid(M.buf) then M.refresh({ force_remote = true }) end
+  vim.notify('GitPanel connection: ' .. active_connection_label(), vim.log.levels.INFO)
+  return true
+end
+
+function M.select_connection(profile)
+  if profile ~= nil and profile ~= '' then return activate_connection(profile) end
+  local choices = M.connection_profiles()
+  vim.ui.select(choices, {
+    prompt = 'GitPanel GitHub connection:',
+    format_item = function(choice)
+      local marker = choice.active and '● ' or '  '
+      local detail = choice.description and (' — ' .. choice.description) or ''
+      return marker .. choice.label .. detail
+    end,
+  }, function(choice)
+    if choice then activate_connection(choice.id) end
+  end)
 end
 
 function M.open(mode)
@@ -1409,7 +1468,74 @@ local function show_scratch(text, opts)
   for _, lhs in ipairs({ 'q', '<Esc>' }) do
     vim.keymap.set('n', lhs, '<cmd>close<cr>', { buffer = buf, nowait = true, silent = true })
   end
+  return buf, win
 end
+
+local function safe_endpoint_summary(value)
+  value = github.redact(value or '')
+  return value:gsub('^(%a[%w+.-]*://)[^/@]+@', '%1<redacted>@')
+end
+
+function M.connection_doctor()
+  local root = M.root
+  if not root then root = detect_root() end
+  local opts = M.config.github
+  local lines = {
+    'GitPanel connection doctor',
+    '',
+    'Profile:       ' .. active_connection_label(),
+    'Transport:     ' .. tostring(opts.transport or 'auto'),
+    'GitHub CLI:    ' .. tostring(opts.gh_command or 'gh') ..
+      (fn.executable(opts.gh_command or 'gh') == 1 and ' (available)' or ' (unavailable)'),
+    'curl:          ' .. tostring(opts.curl_command or 'curl') ..
+      (fn.executable(opts.curl_command or 'curl') == 1 and ' (available)' or ' (unavailable)'),
+    'Credential:    ' .. (opts.token_provider and 'external provider configured' or
+      'none stored by GitPanel'),
+  }
+  if not root then
+    lines[#lines + 1] = 'Repository:    unavailable (not inside a Git repository)'
+    lines[#lines + 1] = 'Status:        local repository discovery failed'
+    return show_scratch(table.concat(lines, '\n'), {
+      filetype = 'gitpaneldoctor', name = 'gitpanel://doctor', title = 'GitPanel Doctor',
+    })
+  end
+  lines[#lines + 1] = 'Root:          ' .. root
+  if not opts.enabled then
+    lines[#lines + 1] = 'Repository:    unavailable'
+    lines[#lines + 1] = 'Status:        GitHub integration is disabled'
+    return show_scratch(table.concat(lines, '\n'), {
+      filetype = 'gitpaneldoctor', name = 'gitpanel://doctor', title = 'GitPanel Doctor',
+    })
+  end
+
+  local repository, repository_error = github.resolve_repository(root, opts)
+  if not repository then
+    lines[#lines + 1] = 'Repository:    unavailable'
+    lines[#lines + 1] = 'Status:        ' .. tostring(repository_error or 'discovery failed')
+    return show_scratch(table.concat(lines, '\n'), {
+      filetype = 'gitpaneldoctor', name = 'gitpanel://doctor', title = 'GitPanel Doctor',
+    })
+  end
+  lines[#lines + 1] = 'Repository:    ' .. repository.repository
+  lines[#lines + 1] = 'Remote host:   ' .. repository.host
+  lines[#lines + 1] = 'REST base:     ' .. safe_endpoint_summary(github.api_base(repository, opts))
+  lines[#lines + 1] = 'Status:        checking repository access…'
+  vim.notify('GitPanel doctor: checking ' .. repository.repository, vim.log.levels.INFO)
+
+  local client_opts = vim.tbl_deep_extend('force', vim.deepcopy(opts), { root = root })
+  local factory = opts.client_factory or github.new
+  local client = factory(client_opts)
+  client:fetch('overview', repository, function(err, _, metadata)
+    vim.schedule(function()
+      lines[#lines] = err and ('Status:        ' .. tostring(err.message or err.kind or err))
+        or ('Status:        reachable via ' .. tostring(metadata and metadata.transport or 'configured transport'))
+      show_scratch(table.concat(lines, '\n'), {
+        filetype = 'gitpaneldoctor', name = 'gitpanel://doctor', title = 'GitPanel Doctor',
+      })
+    end)
+  end)
+end
+
 local function show_commit(sha)
   show_scratch(git({ 'show', '--stat', '--patch', sha }, { allow_fail = true }).stdout)
 end
@@ -2440,6 +2566,8 @@ function M.attach_keys()
   k('gd', M.pr_diff, 'diff pull request against its base')
   k('gc', M.pr_comment, 'comment on pull request')
   k('gm', M.pr_merge, 'merge pull request with configured backend (confirm)')
+  k('gC', M.select_connection, 'select GitHub connection profile')
+  k('gD', M.connection_doctor, 'diagnose GitHub connection')
   k('q', M.close, 'close panel')
   k('g?', M.help, 'help')
   k('?', M.help, 'help')

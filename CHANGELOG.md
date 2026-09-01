@@ -22,6 +22,8 @@ Notable changes are recorded here. Releases follow semantic versioning.
   GitHub.com and GHE behaviour is unchanged.
 - `setup()` options for GitHub transport, repository overrides, cache timing,
   and synchronous or asynchronous short-lived token providers.
+- Named GitHub connection profiles, `:GitPanelConnection`, and a
+  credential-safe `:GitPanelDoctor` reachability report.
 - An opt-in `signed_git` pull-request merge backend that verifies the exact PR
   head, creates a locally signed merge in a temporary worktree, and pushes with
   non-force and lease-protected Git operations.
@@ -48,6 +50,8 @@ Notable changes are recorded here. Releases follow semantic versioning.
 - GitHub credentials are never persisted, rendered, notified, or placed in
   process arguments. Raw GitHub App private keys remain outside Neovim; curl
   authorization headers travel over standard input.
+- Connection selection accepts only settings declared in `setup()` and never
+  presents a token-entry or credential-persistence path.
 - Pull-request branch cleanup is restricted to same-repository heads. Signed
   Git cleanup uses an exact-SHA force-with-lease and never targets fork heads.
 

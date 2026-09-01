@@ -21,6 +21,7 @@ lets you review, comment on, and merge pull requests without leaving it.
 - Staging, discarding, signing-aware commits, and explicit conflict actions.
 - Pull, fetch, push, and first-push repository publication.
 - Asynchronous GitHub synchronization through `gh` or `curl` with no UI stalls.
+- Named GitHub connection profiles with an in-editor selector and credential-safe doctor report.
 - Structured, highlighted, responsive `?` key guide.
 - Verified-signature indicators in commit history.
 - No Neovim plugin dependencies.
@@ -47,7 +48,7 @@ With lazy.nvim:
 ```lua
 {
   "777lotto/git-panel.nvim",
-  cmd = { "GitPanel", "GitPanelSplit" },
+  cmd = { "GitPanel", "GitPanelSplit", "GitPanelConnection", "GitPanelDoctor" },
   keys = {
     { "<leader>gg", "<cmd>GitPanel<cr>", desc = "Git dashboard" },
     { "<leader>gG", "<cmd>GitPanelSplit<cr>", desc = "Git dashboard (split)" },
@@ -71,31 +72,34 @@ nvim --headless -c "helptags ALL" -c quit
 
 - `:GitPanel` opens the full dashboard in a tab.
 - `:GitPanelSplit` opens it as a left split.
+- `:GitPanelConnection [profile]` selects a preconfigured GitHub connection for the session.
+- `:GitPanelDoctor` checks repository discovery and API reachability without displaying credentials.
 
 The Lua API is available through `require("git_panel")`; its primary entry
 point is `require("git_panel").open("tab")` or `.open("split")`.
 
 ## Main controls
 
-| Key | Action |
-| --- | --- |
-| `<Tab>` / `<S-Tab>` | Move to the next / previous view |
-| `1`–`5` | Jump to Changes, History, Actions, Issues, or Pull Requests |
-| `<CR>` | Act on the item under the cursor (LF/keypad Enter also work) |
-| `s` / `u` | Stage / unstage the selected file |
-| `S` / `U` | Stage / unstage all |
-| `c` / `C` | Commit staged / stage all and commit |
-| `a` | Amend the last commit |
-| `b` / `R` / `d` | Create / rename / delete a branch |
-| `W` | Create a worktree |
-| `F` / `P` / `f` | Pull / push-or-publish / fetch |
-| `L` | Toggle tab and split layouts |
-| `r` | Refresh local state and synchronize GitHub repository context |
-| `gx` | Open the selected GitHub item in a browser |
-| `go` / `gd` | Check out / diff the selected pull request against its base |
-| `gc` / `gm` | Comment on / merge the selected pull request (confirm; uses the configured merge backend) |
-| `?` / `g?` | Show the highlighted, scrollable key guide |
-| `q` | Close |
+| Key                 | Action                                                                                    |
+| ------------------- | ----------------------------------------------------------------------------------------- |
+| `<Tab>` / `<S-Tab>` | Move to the next / previous view                                                          |
+| `1`–`5`             | Jump to Changes, History, Actions, Issues, or Pull Requests                               |
+| `<CR>`              | Act on the item under the cursor (LF/keypad Enter also work)                              |
+| `s` / `u`           | Stage / unstage the selected file                                                         |
+| `S` / `U`           | Stage / unstage all                                                                       |
+| `c` / `C`           | Commit staged / stage all and commit                                                      |
+| `a`                 | Amend the last commit                                                                     |
+| `b` / `R` / `d`     | Create / rename / delete a branch                                                         |
+| `W`                 | Create a worktree                                                                         |
+| `F` / `P` / `f`     | Pull / push-or-publish / fetch                                                            |
+| `L`                 | Toggle tab and split layouts                                                              |
+| `r`                 | Refresh local state and synchronize GitHub repository context                             |
+| `gx`                | Open the selected GitHub item in a browser                                                |
+| `go` / `gd`         | Check out / diff the selected pull request against its base                               |
+| `gc` / `gm`         | Comment on / merge the selected pull request (confirm; uses the configured merge backend) |
+| `gC` / `gD`         | Select a GitHub connection profile / diagnose repository access                           |
+| `?` / `g?`          | Show the highlighted, scrollable key guide                                                |
+| `q`                 | Close                                                                                     |
 
 Conflict workflows expose take-ours/take-theirs, continue, and abort actions;
 remote branch renames use leases and avoid overwriting an unrelated ref.
@@ -164,6 +168,8 @@ require("git_panel").setup({
   },
   github = {
     enabled = true,
+    profile = nil,             -- initial named profile; nil uses the base settings
+    profiles = {},             -- named, non-secret setting overrides
     transport = "auto",       -- "auto", "gh", or "curl"
     repository = nil,          -- "OWNER/REPO"; nil detects a Git remote
     host = nil,                -- required to identify a custom GHES host
@@ -180,6 +186,42 @@ require("git_panel").setup({
   },
 })
 ```
+
+### Connection profiles and diagnostics
+
+Profiles group repository discovery, transport, endpoint, and merge settings
+under a user-facing name. The base `github` settings remain the `default`
+choice; a profile overrides them without changing the existing setup contract:
+
+```lua
+require("git_panel").setup({
+  github = {
+    profile = "team-broker",
+    profiles = {
+      ["github-cli"] = {
+        label = "GitHub CLI",
+        transport = "gh",
+        gh_command = "gh",
+      },
+      ["team-broker"] = {
+        label = "Team GitHub broker",
+        description = "Credential-free repository API proxy.",
+        transport = "curl",
+        remote_path_prefix = "github/git",
+        api_url = "https://broker.example/github/api",
+      },
+    },
+  },
+})
+```
+
+Use `:GitPanelConnection` or `gC` to switch among configured profiles. The
+selection lasts for the current Neovim process and immediately resets the
+remote caches; keep a durable default in `setup()`. `:GitPanelDoctor` or `gD`
+reports the active profile, repository discovery, available executables, and a
+live metadata request. It reports only whether an external credential provider
+exists—GitPanel never asks for, renders, or persists a token. `default` is a
+reserved selector name and cannot be used as a profile key.
 
 ### Proxied and self-hosted GitHub endpoints
 
@@ -320,11 +362,11 @@ input, ignores user-level curl configuration, and does not follow redirects.
 
 ## Platform support
 
-| Platform | Status | CI |
-| --- | --- | --- |
-| Linux | Supported | Neovim 0.10.4, 0.11.7, and 0.12.4 |
-| macOS | Supported | Neovim 0.12.4 smoke test |
-| Windows | Untested | Contributions welcome |
+| Platform | Status    | CI                                |
+| -------- | --------- | --------------------------------- |
+| Linux    | Supported | Neovim 0.10.4, 0.11.7, and 0.12.4 |
+| macOS    | Supported | Neovim 0.12.4 smoke test          |
+| Windows  | Untested  | Contributions welcome             |
 
 Platform behavior is kept in the implementation and tested in Actions. It is
 not split into operating-system branches or GitHub Environments.
@@ -359,6 +401,7 @@ spans this plugin and `nvim-config` is planned in the public
 git-panel.nvim/
 ├── .github/                 # CI, issue forms, and contribution templates
 ├── lua/git_panel/init.lua   # dashboard, actions, rendering, and public Lua API
+├── lua/git_panel/connections.lua # named GitHub connection profile resolution
 ├── lua/git_panel/model.lua  # concurrent local Git snapshot and parsers
 ├── lua/git_panel/github.lua # GitHub discovery, transports, and response models
 ├── lua/git_panel/help.lua   # structured responsive key-guide renderer
