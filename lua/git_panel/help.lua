@@ -61,10 +61,12 @@ local SECTIONS = {
       { keys = { '<CR>' }, description = 'Open an in-editor summary for a workflow run, issue, or pull request' },
       { keys = { 'gx' }, description = 'Open the selected item on GitHub' },
       { keys = { 'r' }, description = 'Synchronize repository metadata and every GitHub view now' },
+      { keys = { 'gC', 'gD' }, description = 'Select a configured connection profile / diagnose repository access' },
       { keys = { 'go', 'gd' }, description = 'Check out / diff the selected pull request against its base' },
       { keys = { 'gc', 'gm' }, description = 'Comment on / merge the selected pull request (configured backend, after a confirm)' },
       { note = 'API is the default merge backend; signed_git creates and verifies a locally signed merge before pushing. Fork branches are never deleted.' },
       { note = 'Issue and workflow data stay read-only; pull-request writes always confirm first. Local Git views never require network access.' },
+      { note = 'Connection profiles select preconfigured transports or brokers. GitPanel never prompts for or persists a token.' },
     },
   },
   {

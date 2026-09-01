@@ -29,7 +29,7 @@ With lazy.nvim: >lua
 
     {
       "777lotto/git-panel.nvim",
-      cmd = { "GitPanel", "GitPanelSplit" },
+      cmd = { "GitPanel", "GitPanelSplit", "GitPanelConnection", "GitPanelDoctor" },
     }
 <
 The default bet branch is production. Release tags provide immutable versions;
@@ -42,6 +42,10 @@ Calling setup() is optional. See |git-panel-github| for configuration.
 
 :GitPanel             Open the dashboard in a tab page.
 :GitPanelSplit        Open the dashboard as a left split.
+:GitPanelConnection   Select a configured GitHub connection profile. An
+                      optional profile name skips the first picker.
+:GitPanelDoctor       Diagnose repository discovery and API reachability
+                      without displaying credential values.
 
 ==============================================================================
 4. VIEWS AND KEYS                                                   *git-panel-keys*
@@ -81,6 +85,7 @@ go / gd        Check out or diff the selected pull request against its base.
 gc             Comment on the selected pull request after confirmation.
 gm             Merge the selected pull request with the configured backend
                after confirmation.
+gC / gD        Select a configured GitHub connection / diagnose API access.
 L              Toggle full-tab and left-split layouts.
 r              Refresh local state and force a GitHub synchronization.
 ? / g?         Open the structured, highlighted, scrollable key guide.
@@ -133,6 +138,8 @@ Default configuration: >lua
       },
       github = {
         enabled = true,
+        profile = nil,             -- initial named profile
+        profiles = {},             -- named non-secret setting overrides
         transport = "auto",       -- "auto", "gh", or "curl"
         repository = nil,          -- "OWNER/REPO"
         host = nil,                -- custom GitHub host
@@ -157,6 +164,39 @@ the corresponding Enterprise variables follow GitHub CLI's own behavior.
 github.gh_command may name a compatible API-only wrapper. GitPanel invokes it
 as COMMAND api ENDPOINT [flags] and sets GH_HOST for the detected repository;
 the wrapper does not need to implement other gh command groups.
+
+CONNECTION PROFILES                              *git-panel-github-profiles*
+
+github.profiles groups discovery, transport, endpoint, and merge settings
+under user-facing names. github.profile selects the initial profile. The base
+github settings remain available as the reserved "default" choice. >lua
+
+    require("git_panel").setup({
+      github = {
+        profile = "team-broker",
+        profiles = {
+          ["github-cli"] = {
+            label = "GitHub CLI",
+            transport = "gh",
+            gh_command = "gh",
+          },
+          ["team-broker"] = {
+            label = "Team GitHub broker",
+            description = "Credential-free repository API proxy.",
+            transport = "curl",
+            remote_path_prefix = "github/git",
+            api_url = "https://broker.example/github/api",
+          },
+        },
+      },
+    })
+<
+:GitPanelConnection or gC switches the active profile for the current Neovim
+process and immediately resets remote caches. Keep the durable default in
+setup(). :GitPanelDoctor or gD shows the active profile, repository discovery,
+available transport executables, and the result of a live metadata request.
+It reports only whether an external provider is configured; it never asks for,
+renders, or persists a token. "default" cannot be used as a profile key.
 
 PROXIED GITHUB ENDPOINTS                          *git-panel-github-proxy*
 
@@ -285,6 +325,8 @@ The module is returned by: >lua
     git_panel.setup({})      -- optional
     git_panel.open("tab")    -- or "split"
     git_panel.select_view(3) -- Actions
+    git_panel.select_connection() -- choose a configured connection profile
+    git_panel.connection_doctor() -- test repository discovery and API access
     git_panel.refresh()
     git_panel.close()
 <
