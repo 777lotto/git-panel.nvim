@@ -1,4 +1,5 @@
 local github = require("git_panel.github")
+local connections = require("git_panel.connections")
 local help = require("git_panel.help")
 local local_model = require("git_panel.model")
 local signed_merge = require("git_panel.signed_merge")
@@ -40,6 +41,52 @@ local function test_remote_parsing()
     host = "github.com",
   }))
   equal(configured.repository, "octo/widgets.nvim")
+end
+
+local function test_connection_profiles()
+  local configured = {
+    profile = "broker",
+    transport = "auto",
+    api_url = "",
+    profiles = {
+      public = {
+        label = "Public REST",
+        transport = "curl",
+        description = "Anonymous public repository access.",
+      },
+      broker = {
+        label = "Reviewed broker",
+        transport = "curl",
+        api_url = "http://proxy.example/github/api",
+        allow_insecure_http = true,
+      },
+    },
+  }
+  local active = assert(connections.resolve(configured))
+  equal(active.profile, "broker")
+  equal(active.transport, "curl")
+  equal(active.api_url, "http://proxy.example/github/api")
+  assert(active.label == nil, "profile UI metadata leaked into transport settings")
+
+  local default = assert(connections.resolve(configured, "default"))
+  assert(default.profile == nil, "default profile did not clear the active selection")
+  equal(default.transport, "auto")
+  equal(default.api_url, "")
+
+  local choices = assert(connections.choices(configured, "broker"))
+  equal(choices[1].id, "default")
+  equal(choices[2].id, "broker")
+  equal(choices[2].label, "Reviewed broker")
+  assert(choices[2].active, "active profile was not marked in the picker")
+  equal(choices[3].id, "public")
+
+  local missing, missing_error = connections.resolve(configured, "missing")
+  assert(not missing, "undefined profile was accepted")
+  contains(missing_error, "not defined")
+
+  local invalid, invalid_error = connections.resolve({ profiles = { default = {} } })
+  assert(not invalid, "reserved default profile name was accepted")
+  contains(invalid_error, "other than")
 end
 
 local function test_normalization()
@@ -572,6 +619,7 @@ local function test_proxied_github_host()
 end
 
 test_remote_parsing()
+test_connection_profiles()
 test_proxied_github_host()
 test_normalization()
 test_transports_and_redaction()

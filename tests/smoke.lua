@@ -75,12 +75,23 @@ local function run()
 
   assert(vim.fn.exists(":GitPanel") == 2, ":GitPanel command was not registered")
   assert(vim.fn.exists(":GitPanelSplit") == 2, ":GitPanelSplit command was not registered")
+  assert(vim.fn.exists(":GitPanelConnection") == 2,
+    ":GitPanelConnection command was not registered")
+  assert(vim.fn.exists(":GitPanelDoctor") == 2, ":GitPanelDoctor command was not registered")
 
   vim.cmd("lcd " .. vim.fn.fnameescape(fixture))
   panel = require("git_panel")
   panel.setup({
     github = {
       repository = "octo/git-panel",
+      profile = "fixture",
+      profiles = {
+        fixture = {
+          label = "Fixture transport",
+          description = "Deterministic smoke-test API.",
+          transport = "curl",
+        },
+      },
       client_factory = function()
         return {
           fetch = function(_, view, _, callback)
@@ -121,7 +132,22 @@ local function run()
   assert(vim.api.nvim_win_is_valid(help_win), "help window did not open")
   local help_text = table.concat(vim.api.nvim_buf_get_lines(help_buf, 0, -1, false), "\n")
   assert_contains(help_text, "GitHub views")
+  assert_contains(help_text, "gC")
   vim.api.nvim_win_close(help_win, true)
+  vim.api.nvim_set_current_win(panel.win)
+
+  local profile_choices = panel.connection_profiles()
+  assert(profile_choices[2].id == "fixture" and profile_choices[2].active,
+    "configured connection profile was not active")
+  assert(panel.select_connection("fixture"), "connection profile could not be selected")
+  panel.connection_doctor()
+  assert(vim.wait(1000, function()
+    return vim.api.nvim_buf_get_name(0) == "gitpanel://doctor"
+  end), "connection doctor did not open its report")
+  local doctor_text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  assert_contains(doctor_text, "Profile:       Fixture transport")
+  assert_contains(doctor_text, "Status:        reachable via fixture")
+  vim.cmd("close")
   vim.api.nvim_set_current_win(panel.win)
 
   panel.toggle_view()
