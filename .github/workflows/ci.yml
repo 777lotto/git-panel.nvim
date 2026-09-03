@@ -3,11 +3,9 @@ name: CI
 on:
   push:
     branches:
-      - bet
       - bluff
   pull_request:
     branches:
-      - bet
       - bluff
   workflow_dispatch:
 
@@ -19,20 +17,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  promotion-source:
-    name: promotion-source
-    if: github.event_name == 'pull_request' && github.base_ref == 'bet'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Require bluff as the production promotion source
-        env:
-          HEAD_BRANCH: ${{ github.head_ref }}
-        run: |
-          if [[ "$HEAD_BRANCH" != "bluff" ]]; then
-            echo "Pull requests into bet must promote the persistent bluff branch." >&2
-            exit 1
-          fi
-
   quality:
     name: quality
     runs-on: ubuntu-24.04

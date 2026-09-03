@@ -1,9 +1,9 @@
 name: Notify nvim-config
 
 on:
-  push:
-    branches:
-      - bet
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
@@ -12,11 +12,14 @@ permissions:
 jobs:
   dispatch:
     name: request focused lock refresh
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: ubuntu-24.04
     steps:
-      - name: Dispatch GitPanel production update
+      - name: Dispatch released GitPanel commit
         env:
           GH_TOKEN: ${{ secrets.NVIM_CONFIG_DISPATCH_TOKEN }}
+          PLUGIN_COMMIT: ${{ github.sha }}
+          PLUGIN_TAG: ${{ github.event.release.tag_name }}
         run: |
           if [[ -z "${GH_TOKEN:-}" ]]; then
             echo "::notice title=nvim-config dispatch skipped::Configure NVIM_CONFIG_DISPATCH_TOKEN to enable cross-repository lock refreshes."
@@ -24,4 +27,6 @@ jobs:
           fi
           gh api --method POST repos/777lotto/nvim-config/dispatches \
             --raw-field event_type=plugin-release \
-            --field 'client_payload[plugin]=git-panel.nvim'
+            --field 'client_payload[plugin]=git-panel.nvim' \
+            --field "client_payload[commit]=$PLUGIN_COMMIT" \
+            --field "client_payload[tag]=${PLUGIN_TAG:-manual}"

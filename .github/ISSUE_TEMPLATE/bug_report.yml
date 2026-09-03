@@ -71,7 +71,7 @@ body:
     attributes:
       label: Checks
       options:
-        - label: I reproduced this on the current `bet` or `bluff` branch.
+        - label: I reproduced this on the current `bluff` branch.
           required: true
         - label: I checked existing issues for the same problem.
           required: true

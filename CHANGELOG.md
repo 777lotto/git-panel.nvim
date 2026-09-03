@@ -8,8 +8,9 @@ Notable changes are recorded here. Releases follow semantic versioning.
 
 - Responsive repository overview data, concurrent Git snapshots, contextual
   wide-layout details, and informative compact/empty states.
-- A production-branch hook that can request a focused GitPanel lock refresh in
-  `nvim-config` without floating user installs away from tested commits.
+- A stable-release hook that requests a focused, exact-commit GitPanel lock
+  refresh in `nvim-config` without floating user installs away from tested
+  commits.
 - Read-only Actions, Issues, and Pull Requests views with asynchronous `gh` and
   curl transports, per-repository caches, explicit loading/error states, and
   in-editor or browser details.
@@ -31,6 +32,8 @@ Notable changes are recorded here. Releases follow semantic versioning.
 
 ### Changed
 
+- `bluff` is now the default and only long-lived branch; CI and contributor
+  guidance no longer retain the retired `bet` promotion path.
 - The panel now exposes five views with forward/reverse tab cycling and numeric
   navigation.
 - The `?` key guide is structured, semantically highlighted, responsive, and
