@@ -1,6 +1,6 @@
 # git-panel.nvim
 
-[![CI](https://github.com/777lotto/git-panel.nvim/actions/workflows/ci.yml/badge.svg?branch=bet)](https://github.com/777lotto/git-panel.nvim/actions/workflows/ci.yml)
+[![CI](https://github.com/777lotto/git-panel.nvim/actions/workflows/ci.yml/badge.svg?branch=bluff)](https://github.com/777lotto/git-panel.nvim/actions/workflows/ci.yml)
 [![Neovim](https://img.shields.io/badge/Neovim-0.10%2B-57A143?logo=neovim&logoColor=white)](https://neovim.io/)
 [![Release](https://img.shields.io/github/v/release/777lotto/git-panel.nvim)](https://github.com/777lotto/git-panel.nvim/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -56,9 +56,9 @@ With lazy.nvim:
 }
 ```
 
-The default `bet` branch is production. Pin a release tag for a deliberately
-stable installation, or use `branch = "bluff"` only when testing integration
-work.
+`bluff` is the default and only long-lived branch. Pin a release tag for an
+immutable installation, or let your plugin manager follow `bluff` and retain
+its own tested lock.
 
 With Neovim's native packages:
 
@@ -373,17 +373,19 @@ not split into operating-system branches or GitHub Environments.
 
 ## Branch and release model
 
-- `bet` is the production/default branch.
-- `bluff` is the persistent integration branch.
-- Focused branches merge into `bluff`; releases promote `bluff` into `bet`.
-- Signed `vX.Y.Z` tags identify releases.
+- `bluff` is the default and only long-lived branch.
+- Focused branches start from and merge into `bluff`.
+- Signed `vX.Y.Z` tags and GitHub Releases mark tested `bluff` commits.
 
-Each push to production `bet` can request a focused `git-panel.nvim` lockfile
-refresh in `777lotto/nvim-config`. Configure the plugin repository secret
+Publishing a stable GitHub Release requests a focused, exact-commit
+`git-panel.nvim` lockfile refresh in `777lotto/nvim-config`. Configure the
+plugin repository secret
 `NVIM_CONFIG_DISPATCH_TOKEN` with a fine-grained token scoped only to
 `777lotto/nvim-config` and its Contents permission set to write. If the secret
 is absent, the notification workflow exits successfully with a setup notice;
-it never broadens repository or network access.
+it never broadens repository or network access. Creating the signed tag and
+Release, and provisioning that repository secret, are operator actions; the
+credential-free ZemRip agent broker deliberately exposes none of those APIs.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for checks and pull-request guidance.
 

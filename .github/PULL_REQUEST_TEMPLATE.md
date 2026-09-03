@@ -9,8 +9,8 @@
 
 ## Validation
 
-- [ ] I targeted `bluff`, or this is a `bluff` → `bet` promotion.
-- [ ] Commits are signed and show as verified on GitHub.
+- [ ] I targeted the default `bluff` branch.
+- [ ] Commit provenance is explicit (human commits signed; brokered agent commits use the expected unsigned identity).
 - [ ] Lua compilation, focused unit tests, and the Git fixture smoke test pass.
 - [ ] `:help git-panel` matches user-visible behavior.
 - [ ] I updated `CHANGELOG.md` for a user-visible change.
