@@ -7,9 +7,13 @@ the proposed behavior.
 
 - `bluff` is the default and only long-lived branch.
 - Short-lived work branches start from and return to `bluff`.
-- Releases are signed tags from tested `bluff` commits.
+- CI publishes unsigned version tags and Releases from tested `bluff` commits.
+  See [automatic releases](docs/releases.md); human-created tags may still be signed.
 
 ## Local checks
+
+Run `bash scripts/test-release-tested.sh` to check release selection and retry
+behavior against local fixtures.
 
 Run these from the repository root with Neovim 0.10 or newer:
 

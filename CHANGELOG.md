@@ -4,6 +4,12 @@ Notable changes are recorded here. Releases follow semantic versioning.
 
 ## Unreleased
 
+### Automation
+
+- Publish a versioned Release after successful push CI on the current `bluff`
+  commit and directly request its exact pin in `nvim-config`. Tags are created
+  by CI without a human signature; interrupted runs reuse the same release.
+
 ### Added
 
 - Responsive repository overview data, concurrent Git snapshots, contextual
