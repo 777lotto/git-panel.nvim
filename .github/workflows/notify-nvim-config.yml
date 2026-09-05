@@ -12,7 +12,7 @@ permissions:
 jobs:
   dispatch:
     name: request focused lock refresh
-    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'release' && github.event.release.prerelease == false)
     runs-on: ubuntu-24.04
     steps:
       - name: Dispatch released GitPanel commit
@@ -21,9 +21,10 @@ jobs:
           PLUGIN_COMMIT: ${{ github.sha }}
           PLUGIN_TAG: ${{ github.event.release.tag_name }}
         run: |
+          set -euo pipefail
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::notice title=nvim-config dispatch skipped::Configure NVIM_CONFIG_DISPATCH_TOKEN to enable cross-repository lock refreshes."
-            exit 0
+            echo "::error title=nvim-config dispatch unavailable::Configure NVIM_CONFIG_DISPATCH_TOKEN to enable cross-repository lock refreshes."
+            exit 1
           fi
           gh api --method POST repos/777lotto/nvim-config/dispatches \
             --raw-field event_type=plugin-release \
